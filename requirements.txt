@@ -1,0 +1,9 @@
+# KG-LightGCN ICTA2026 — Python dependencies
+# PyTorch được cài qua base image (pytorch/pytorch:2.1.2-cuda11.8-cudnn8-runtime)
+# Không cần cài lại ở đây.
+
+numpy>=1.23,<2.0
+scipy>=1.9,<2.0
+scikit-learn>=1.1
+pyyaml>=6.0
+tqdm>=4.64

@@ -1,0 +1,74 @@
+# configs/base.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# BASE CONFIGURATION — dùng chung cho TẤT CẢ models (fairness constraint)
+#
+# Path override qua .env (ưu tiên hơn yaml):
+#   DATA_ROOT=/hdd/datasets       → thay dataset.data_dir
+#   RESULTS_ROOT=/ssd/results     → thay logging.*
+#   NUM_WORKERS=4                 → thay train.num_workers
+#   DEVICE=cuda                   → thay train.device
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+dataset:
+  name: amazon-book # amazon-book | yelp2018
+  # data_dir: fallback khi DATA_ROOT không được set trong .env
+  # Lưu dataset trên HDD để giải phóng SSD cho logs/checkpoints
+  data_dir: data/processed
+  cold_split: null # null | cold_10 | cold_20 | cold_30
+  kg_type: full # full | category | brand | none
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model:
+  name: lightgcn
+  embedding_dim: 64 # HARD CONSTRAINT — không đổi per-model
+  n_layers: 3 # K ∈ {1,2,3,4}
+
+# ── Training ──────────────────────────────────────────────────────────────────
+train:
+  epochs: 1000
+  batch_size: 2048
+  learning_rate: 0.001
+  optimizer: adam
+  weight_decay: 1.0e-4
+  neg_samples: 1
+  early_stopping_patience: 20
+  early_stopping_metric: recall@20
+  seed: 42
+  device: auto # auto | cpu | cuda | cuda:0
+
+  # ── DataLoader workers ───────────────────────────────────────────────────
+  # Overridable qua env var NUM_WORKERS hoặc --override train.num_workers=N
+  # Gợi ý theo hardware:
+  #   RTX 3050 + 32GB RAM  → 4
+  #   CPU-only (8-core)    → 6–8
+  #   Server (32+ cores)   → 8–16
+  #   Debug / Windows WSL  → 0  (tắt multiprocessing)
+  num_workers: 0
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+eval:
+  batch_size: 2048 # Tăng lên 4096+ nếu VRAM đủ
+  top_k: [10, 20]
+  full_ranking: true
+  metrics: [recall, ndcg, hr]
+  eval_interval: 10 # Evaluate mỗi N epoch (1 = mỗi epoch, chậm hơn)
+
+# ── Contrastive learning (SimGCL / KGCL / KG-LightGCN-CL) ───────────────────
+contrastive:
+  temperature: 0.2
+  lambda_cl: 0.5
+
+# ── Logging & Checkpointing ───────────────────────────────────────────────────
+# Fallback paths khi RESULTS_ROOT không được set trong .env
+# Nên để logs/checkpoints trên SSD để đọc/ghi nhanh
+logging:
+  log_dir: results/logs
+  checkpoint_dir: results/checkpoints
+  result_dir: results/tables
+  log_interval: 1 # Log loss mỗi N epoch
+
+# ── Reproducibility ───────────────────────────────────────────────────────────
+reproducibility:
+  seeds: [42, 0, 1, 2, 3]
+  verify_preprocessing: true

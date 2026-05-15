@@ -1,0 +1,6 @@
+# configs/model/kgat.yaml
+model:
+  name: kgat
+  n_layers: 3
+  relation_dim: 64
+  agg_type: bi-interaction   # bi-interaction | gcn | graphsage

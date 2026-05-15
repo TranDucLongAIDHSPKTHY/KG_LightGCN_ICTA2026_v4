@@ -1,0 +1,62 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# KG-LightGCN — .gitignore
+# Chỉ push source code. Dataset, logs, checkpoints lưu ngoài repo.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Model weights & checkpoints — lưu trên SSD ngoài repo
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# Dataset — lưu trên HDD ngoài repo
+data/
+
+# Logs & kết quả — lưu trên SSD ngoài repo
+results/logs/
+results/checkpoints/
+results/tables/
+logs/
+runs/
+wandb/
+
+# Environment secrets — KHÔNG BAO GIỜ push lên GitHub
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/

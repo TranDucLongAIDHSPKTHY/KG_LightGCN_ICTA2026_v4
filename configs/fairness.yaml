@@ -1,0 +1,17 @@
+# configs/fairness.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# FAIRNESS PROTOCOL — enforced across all model comparisons
+# All models MUST share these exact settings.
+# ─────────────────────────────────────────────────────────────────────────────
+fairness:
+  embedding_dim: 64          # HARD — never overridden per model
+  optimizer: adam
+  learning_rate: 0.001
+  batch_size: 2048
+  neg_samples: 1             # uniform negative sampling
+  epochs: 1000
+  early_stopping_patience: 20
+  early_stopping_metric: recall@20
+  # Contrastive learning (applied only to CL-based models)
+  temperature: 0.2
+  lambda_cl: 0.5

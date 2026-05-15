@@ -1,0 +1,8 @@
+# configs/model/kg_lightgcn.yaml
+model:
+  name: kg_lightgcn
+  n_layers: 3
+  kg_n_layers: 2
+  kg_type: full        # full | category | brand | none
+  entity_agg: mean     # mean | attention
+  kg_reg: 1.0e-5

@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# KG-LightGCN — .dockerignore
+# Giúp Docker build nhanh hơn bằng cách loại bỏ file không cần thiết.
+# Dataset & logs được mount vào container qua bind mount, không copy vào image.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Git
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Model weights — không cần trong image, mount từ ngoài
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# Dataset — mount qua -v /hdd/datasets:/datasets
+data/
+
+# Logs & checkpoints — mount qua -v /ssd/results:/workspace/results
+results/logs/
+results/checkpoints/
+results/tables/
+logs/
+runs/
+
+# Secrets
+.env
+.env.*
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Dev files
+*.ipynb
+.ipynb_checkpoints/
+*.md

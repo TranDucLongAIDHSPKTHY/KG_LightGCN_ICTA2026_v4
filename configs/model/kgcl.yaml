@@ -1,0 +1,11 @@
+# configs/model/kgcl.yaml
+model:
+  name: kgcl
+  n_layers: 3
+  kg_n_layers: 2
+  temp: 0.2
+  lambda_kg: 0.5
+
+contrastive:
+  temperature: 0.2
+  lambda_cl: 0.5

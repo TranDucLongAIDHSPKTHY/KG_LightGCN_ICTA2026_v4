@@ -1,0 +1,9 @@
+# configs/model/simgcl.yaml
+model:
+  name: simgcl
+  n_layers: 3
+  eps: 0.1   # noise magnitude for contrastive augmentation
+
+contrastive:
+  temperature: 0.2
+  lambda_cl: 0.5
