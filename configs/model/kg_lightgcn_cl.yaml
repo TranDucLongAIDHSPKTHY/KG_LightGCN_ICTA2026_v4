@@ -1,14 +1,17 @@
 # configs/model/kg_lightgcn_cl.yaml
-# Biến thể 2: KG-LightGCN-CL (Enhanced/Proposed)
+# ─────────────────────────────────────────────────────────────────────────────
+# KG-LightGCN-CL (Biến thể 2 — This work): BPR + Cross-view CL + KG alignment
+# Follows SimGCL/KGCL protocol for CL hyperparameters.
+# ─────────────────────────────────────────────────────────────────────────────
 model:
   name: kg_lightgcn_cl
   n_layers: 3
   kg_n_layers: 2
-  kg_type: full          # full | category | brand | none
+  kg_type: full
   entity_agg: mean
-  kg_reg: 1.0e-5
-  eps: 0.1               # noise magnitude for CF augmented view
+  kg_reg: 1.0e-5 # KG alignment loss weight
+  eps: 0.1 # noise magnitude (follows SimGCL: 0.1)
 
 contrastive:
-  temperature: 0.2       # InfoNCE temperature (fairness: 0.2)
-  lambda_cl: 0.5         # CL loss weight (fairness: 0.5)
+  temperature: 0.2 # follows SimGCL/KGCL: 0.2
+  lambda_cl: 0.5 # cross-view CL weight

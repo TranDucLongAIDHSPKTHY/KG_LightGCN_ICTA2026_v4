@@ -1,6 +1,49 @@
 # configs/model/kgat.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# KGAT — Wang et al., KDD 2019
+# Ref: https://github.com/xiangwang1223/knowledge_graph_attention_network
+#
+# Original paper/repo defaults:
+#   lr=0.0001 (NOT 0.001!), embed_size=64, kge_size=64
+#   layer_size=[64]  (1 layer default; paper tests [64,32,16] for 3 layers)
+#   batch_size=1024, batch_size_kg=2048
+#   regs=[1e-5, 1e-5, 1e-2]  → user/item L2=1e-5, TransR L2=1e-2
+#   node_dropout=[0.1], mess_dropout=[0.1]
+#   alg_type=bi  (bi-interaction)
+#   epoch=100 (small default; paper trains up to 400)
+#
+# Changes from project v4:
+#   [PARAM-1] learning_rate: base.yaml has 0.001, KGAT paper uses 0.0001.
+#             FIXED: override lr: 0.0001
+#   [PARAM-2] weight_decay: base.yaml has 1e-4; KGAT paper uses 1e-5 for
+#             user/entity embeddings, 1e-2 for TransR weights.
+#             Simplified: use 1e-5 globally (matches entity reg in paper).
+#             FIXED: override weight_decay: 1.0e-5
+#   [PARAM-3] n_layers: project uses 3; paper default is 1 [64] but
+#             benchmarks with [64,32,16] (3 layers). Keep 3 for fairness.
+#   [PARAM-4] relation_dim: 64 → MATCHES paper (kge_size=64) ✓
+#   [PARAM-5] kg_reg (TransR loss weight): project sets 1e-5; paper uses
+#             separate KG BPR loss with no explicit λ (alternating training).
+#             1e-5 is reasonable; original alternates every batch.
+#   [PARAM-6] agg_type: bi-interaction → MATCHES paper ✓
+#   [PARAM-7] batch_size: base.yaml 2048; paper uses 1024 for CF and 2048
+#             for KG. Keep 2048 for fairness comparison.
+# ─────────────────────────────────────────────────────────────────────────────
 model:
   name: kgat
-  n_layers: 3
-  relation_dim: 64
-  agg_type: bi-interaction   # bi-interaction | gcn | graphsage
+  n_layers: 3 # paper benchmark: [64,32,16] dims = 3 layers
+  relation_dim: 64 # paper: kge_size=64 ✓
+  agg_type: bi-interaction # paper: bi ✓
+
+train:
+  learning_rate: 0.0001 # FIXED: paper default is 1e-4, NOT 1e-3
+  weight_decay: 1.0e-5 # FIXED: paper regs=[1e-5,1e-5,...] for embeddings
+
+  # KG-specific: KGAT alternates CF and KG training
+  # kg_batch_size is separate from CF batch_size in original code
+  kg_batch_size: 2048 # paper: batch_size_kg=2048
+
+model_extra:
+  kg_reg: 1.0e-5 # TransR embedding regularisation
+  # Note: KGAT paper also uses dropout (node=0.1, mess=0.1) for regularisation
+  # These are not currently wired in the model; add dropout in future work.

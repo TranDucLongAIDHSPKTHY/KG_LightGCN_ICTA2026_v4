@@ -232,13 +232,16 @@ class KGLightGCN(_KGEnrichMixin, BaseModel):
     # ── Setters ───────────────────────────────────────────────────────────────
 
     def set_adj(self, norm_adj: torch.Tensor) -> None:
-        self.norm_adj = norm_adj.to(self.device)
+        # FIX: use register_buffer so tensor follows model.to(device) correctly
+        self.register_buffer("norm_adj", norm_adj)
 
     def set_kg_norm_adj(self, kg_norm_adj: torch.Tensor) -> None:
-        self.kg_norm_adj = kg_norm_adj.to(self.device)
+        # FIX: use register_buffer
+        self.register_buffer("kg_norm_adj", kg_norm_adj)
 
     def set_item_entity_map(self, item2entity: torch.Tensor) -> None:
-        self.item2entity = item2entity.to(self.device)
+        # FIX: use register_buffer
+        self.register_buffer("item2entity", item2entity)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -330,7 +333,9 @@ class KGLightGCNCL(_KGEnrichMixin, BaseModel):
         for _ in range(self.n_layers):
             E_k = torch.sparse.mm(adj, E_k)
             if perturb:
-                noise = F.normalize(torch.rand_like(E_k) * 2.0 - 1.0, dim=-1) * self.eps
+                # FIX: uniform noise in [-eps, eps] per element (no normalize)
+                # Matches SimGCL paper Eq.4: ε ~ Uniform(-eps, eps) independent per dim
+                noise = (torch.rand_like(E_k) * 2.0 - 1.0) * self.eps
                 E_k = E_k + noise
             acc = acc + E_k
         E_final = acc / (self.n_layers + 1)
@@ -444,10 +449,13 @@ class KGLightGCNCL(_KGEnrichMixin, BaseModel):
     # ── Setters ───────────────────────────────────────────────────────────────
 
     def set_adj(self, norm_adj: torch.Tensor) -> None:
-        self.norm_adj = norm_adj.to(self.device)
+        # FIX: use register_buffer so tensor follows model.to(device) correctly
+        self.register_buffer("norm_adj", norm_adj)
 
     def set_kg_norm_adj(self, kg_norm_adj: torch.Tensor) -> None:
-        self.kg_norm_adj = kg_norm_adj.to(self.device)
+        # FIX: use register_buffer
+        self.register_buffer("kg_norm_adj", kg_norm_adj)
 
     def set_item_entity_map(self, item2entity: torch.Tensor) -> None:
-        self.item2entity = item2entity.to(self.device)
+        # FIX: use register_buffer
+        self.register_buffer("item2entity", item2entity)

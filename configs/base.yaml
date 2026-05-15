@@ -2,6 +2,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # BASE CONFIGURATION — dùng chung cho TẤT CẢ models (fairness constraint)
 #
+# IMPORTANT: Một số model ghi đè (override) các tham số base tại đây:
+#   - KGAT:   learning_rate → 0.0001, weight_decay → 1e-5
+#   - SimGCL: weight_decay → 0.0
+#   - KGCL:   lambda_cl/lambda_kg → 0.1, early_stopping_patience → 5
+#
 # Path override qua .env (ưu tiên hơn yaml):
 #   DATA_ROOT=/hdd/datasets       → thay dataset.data_dir
 #   RESULTS_ROOT=/ssd/results     → thay logging.*
@@ -12,8 +17,6 @@
 # ── Dataset ───────────────────────────────────────────────────────────────────
 dataset:
   name: amazon-book # amazon-book | yelp2018
-  # data_dir: fallback khi DATA_ROOT không được set trong .env
-  # Lưu dataset trên HDD để giải phóng SSD cho logs/checkpoints
   data_dir: data/processed
   cold_split: null # null | cold_10 | cold_20 | cold_30
   kg_type: full # full | category | brand | none
@@ -22,51 +25,44 @@ dataset:
 model:
   name: lightgcn
   embedding_dim: 64 # HARD CONSTRAINT — không đổi per-model
-  n_layers: 3 # K ∈ {1,2,3,4}
+  n_layers: 3
 
 # ── Training ──────────────────────────────────────────────────────────────────
 train:
   epochs: 1000
   batch_size: 2048
-  learning_rate: 0.001
+  learning_rate: 0.001 # LightGCN/SimGCL/KGCL default; KGAT overrides to 0.0001
   optimizer: adam
-  weight_decay: 1.0e-4
+  weight_decay: 1.0e-4 # LightGCN/KGCL default; SimGCL overrides to 0; KGAT to 1e-5
   neg_samples: 1
-  early_stopping_patience: 20
+  early_stopping_patience: 10 # KGCL overrides to 5
   early_stopping_metric: recall@20
   seed: 42
   device: auto # auto | cpu | cuda | cuda:0
-
-  # ── DataLoader workers ───────────────────────────────────────────────────
-  # Overridable qua env var NUM_WORKERS hoặc --override train.num_workers=N
-  # Gợi ý theo hardware:
-  #   RTX 3050 + 32GB RAM  → 4
-  #   CPU-only (8-core)    → 6–8
-  #   Server (32+ cores)   → 8–16
-  #   Debug / Windows WSL  → 0  (tắt multiprocessing)
   num_workers: 4
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 eval:
-  batch_size: 2048 # Tăng lên 4096+ nếu VRAM đủ
+  batch_size: 2048
   top_k: [10, 20]
   full_ranking: true
   metrics: [recall, ndcg, hr]
-  eval_interval: 10 # Evaluate mỗi N epoch (1 = mỗi epoch, chậm hơn)
+  eval_interval: 5 # evaluate mỗi N epoch
 
 # ── Contrastive learning (SimGCL / KGCL / KG-LightGCN-CL) ───────────────────
+# Per-model overrides:
+#   SimGCL: lambda_cl=0.5, temperature=0.2  (paper values)
+#   KGCL:   lambda_cl=0.1, temperature=0.2  (original world.py: ssl_reg=0.1)
 contrastive:
   temperature: 0.2
   lambda_cl: 0.5
 
 # ── Logging & Checkpointing ───────────────────────────────────────────────────
-# Fallback paths khi RESULTS_ROOT không được set trong .env
-# Nên để logs/checkpoints trên SSD để đọc/ghi nhanh
 logging:
   log_dir: results/logs
   checkpoint_dir: results/checkpoints
   result_dir: results/tables
-  log_interval: 1 # Log loss mỗi N epoch
+  log_interval: 1
 
 # ── Reproducibility ───────────────────────────────────────────────────────────
 reproducibility:

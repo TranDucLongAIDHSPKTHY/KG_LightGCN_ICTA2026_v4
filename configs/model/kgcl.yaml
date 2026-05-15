@@ -1,11 +1,47 @@
 # configs/model/kgcl.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# KGCL — Yang et al., SIGIR 2022
+# Ref: https://github.com/yuh-yang/KGCL-SIGIR22
+#
+# Original repo defaults (world.py):
+#   lr=0.001, decay=1e-4, batch=2048, emb=64, layers=3
+#   kgc_temp=0.2, ssl_reg=0.1 (NOT 0.5!)
+#   kg_p_drop=0.5 (KG edge drop probability)
+#   ui_p_drop dataset-specific:
+#     amazon-book: 0.05 (edge drop for UI graph)
+#     yelp2018:    0.1
+#   early_stop_cnt: 5 (not 20!)
+#
+# Changes from project v4:
+#   [PARAM-1] lambda_kg (ssl_reg): project has 0.5; original KGCL uses 0.1!
+#             FIXED: lambda_kg: 0.1
+#   [PARAM-2] lambda_cl (contrastive): project base has 0.5; original also
+#             ssl_reg=0.1 for the CL loss. FIXED: lambda_cl: 0.1
+#   [PARAM-3] temp: 0.2 → MATCHES original kgc_temp=0.2 ✓
+#   [PARAM-4] kg_p_drop: not in project configs (missing!).
+#             ADDED: kg_p_drop: 0.5 (KG triplet drop in augmentation)
+#   [PARAM-5] ui_p_drop: not in project configs (missing!).
+#             ADDED: ui_p_drop: 0.1 (yelp2018 default; use 0.05 for amazon)
+#   [PARAM-6] early_stopping_patience: project base 20; KGCL repo uses 5.
+#             FIXED: 5
+#   [PARAM-7] kg_n_layers: 2 — not specified in KGCL original (it uses RGAT
+#             over KG, not LightGCN-style). Keep 2 as reasonable.
+# ─────────────────────────────────────────────────────────────────────────────
 model:
   name: kgcl
   n_layers: 3
   kg_n_layers: 2
-  temp: 0.2
-  lambda_kg: 0.5
+  temp: 0.2 # kgc_temp in original ✓
+
+  # KG-guided augmentation drop probabilities (from world.py)
+  kg_p_drop: 0.5 # ADDED: probability of dropping KG edges in aug
+  ui_p_drop: 0.1 # ADDED: yelp2018=0.1, amazon-book=0.05
+
+  lambda_kg: 0.1 # FIXED: was 0.5, original ssl_reg=0.1
+
+train:
+  early_stopping_patience: 5 # FIXED: was 20, KGCL uses 5
 
 contrastive:
-  temperature: 0.2
-  lambda_cl: 0.5
+  temperature: 0.2 # ✓
+  lambda_cl: 0.1 # FIXED: was 0.5, original uses ssl_reg=0.1

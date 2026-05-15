@@ -1,8 +1,12 @@
 # configs/model/kg_lightgcn.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# KG-LightGCN (Biến thể 1 — This work): BPR + KG alignment
+# No direct reference; follows LightGCN protocol with KG side info.
+# ─────────────────────────────────────────────────────────────────────────────
 model:
   name: kg_lightgcn
   n_layers: 3
   kg_n_layers: 2
-  kg_type: full        # full | category | brand | none
-  entity_agg: mean     # mean | attention
-  kg_reg: 1.0e-5
+  kg_type: full # full | category | brand | none
+  entity_agg: mean # mean | attention
+  kg_reg: 1.0e-5 # KG alignment loss weight

@@ -1,4 +1,23 @@
 # configs/model/lightgcn.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# LightGCN — He et al., SIGIR 2020
+# Ref: https://github.com/gusye1234/LightGCN-PyTorch
+#
+# Paper defaults (gusye1234 repo):
+#   lr=0.001, decay=1e-4, layer=3, recdim=64, batch=2048, epochs=1000
+#   topks=[20], seed=2020, dropout=0, keepprob=0.6
+#
+# Changes from project v4:
+#   [PARAM-1] weight_decay: project base.yaml has 1e-4 → MATCHES paper (OK)
+#   [PARAM-2] n_layers: 3 → MATCHES paper (OK)
+#   [PARAM-3] embedding_dim: 64 → MATCHES paper (OK)
+#   [PARAM-4] early_stopping_patience: 20 → paper has no ES; KGCL uses 5-10
+#             Recommendation: reduce to 10 for faster turnaround.
+# ─────────────────────────────────────────────────────────────────────────────
 model:
   name: lightgcn
-  n_layers: 3
+  n_layers: 3 # paper: 3 (best on Yelp2018, Amazon-book)
+
+train:
+  weight_decay: 1.0e-4 # paper: --decay=1e-4  ✓
+  early_stopping_patience: 10 # paper: no ES; 10 is safe for large datasets

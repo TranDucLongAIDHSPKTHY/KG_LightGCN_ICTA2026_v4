@@ -33,7 +33,10 @@ def recall_at_k(
         return 0.0
     top_k = set(ranked_items[:k].tolist())
     gt = set(ground_truth)
-    return len(top_k & gt) / min(len(gt), k)
+    # FIX: standard Recall@K = |hits| / |GT|, not / min(|GT|, k)
+    # Dividing by min(len(gt), k) computes "capped recall" which inflates
+    # scores for users with few ground-truth items and is non-standard.
+    return len(top_k & gt) / len(gt)
 
 
 def ndcg_at_k(
@@ -111,7 +114,8 @@ def batch_recall_at_k(
         row = ranked_matrix[i]
         actual_k = min(k, len(row))
         hits = sum(1 for item in row[:actual_k] if item in gt_set)
-        recalls[i] = hits / min(len(gt_set), actual_k)
+        # FIX: denominator is |GT|, not min(|GT|, k)
+        recalls[i] = hits / len(gt_set)
     return recalls
 
 

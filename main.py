@@ -176,8 +176,11 @@ def build_kgcl(dataset: KGDataset, cfg: dict, device: torch.device) -> KGCL:
         embedding_dim=model_cfg.get("embedding_dim", 64),
         n_layers=model_cfg.get("n_layers", 3),
         kg_n_layers=model_cfg.get("kg_n_layers", 2),
-        temp=cl_cfg.get("temperature", 0.2),
-        lambda_kg=cl_cfg.get("lambda_cl", 0.5),
+        temp=model_cfg.get("temp", cl_cfg.get("temperature", 0.2)),
+        # FIX: lambda_kg must come from model_cfg, not cl_cfg["lambda_cl"]
+        # Training CL weight (self.lambda_cl) is read by KGTrainer from cfg["contrastive"]
+        # KGCL.lambda_kg here is informational only (not used in KGTrainer._kgcl_step)
+        lambda_kg=model_cfg.get("lambda_kg", 0.1),
         norm_adj=dataset.norm_adj_mat,
         kg_triples=dataset.kg_triples,
         device=device,
@@ -374,7 +377,7 @@ def train_model(
 
     # Cold-start eval (Cold-20 protocol for LightGCN and KG-LightGCN)
     if model_name in ("lightgcn", "kg_lightgcn", "kg_lightgcn_cl") and cold_split is None:
-        _run_cold_eval(model_name, cfg, results, device, data_dir, result_dir)
+        _run_cold_eval(model_name, cfg, results, device, data_dir, result_dir, checkpoint_dir)
 
     return results
 
@@ -386,6 +389,7 @@ def _run_cold_eval(
     device: torch.device,
     data_dir: str,
     result_dir: str,
+    checkpoint_dir: str,          # FIX: was missing from signature — caused NameError
 ) -> None:
     """Run Cold-20 evaluation using the best checkpoint from seed=42."""
     cold_dir = os.path.join(data_dir, "cold_20")
@@ -394,10 +398,12 @@ def _run_cold_eval(
         return
 
     logger.info(f"Running Cold-20 evaluation for {model_name} …")
-    # We use the seed-42 result (first seed)
-    seed_result = multi_seed_results["per_seed"][0]
-    checkpoint_dir = cfg.get("logging", {}).get("checkpoint_dir", "results/checkpoints")
-    ckpt_path = os.path.join(checkpoint_dir, f"{model_name}_seed42_best.pt")
+    # FIX: trainer saves to checkpoint_dir/<dataset_name>/<model_name>/seed42_best.pt
+    # NOT to checkpoint_dir/<model_name>_seed42_best.pt
+    dataset_name = cfg.get("dataset", {}).get("name", "amazon-book")
+    ckpt_path = os.path.join(
+        checkpoint_dir, dataset_name, model_name, "seed42_best.pt"
+    )
     if not os.path.exists(ckpt_path):
         logger.warning(f"Checkpoint not found: {ckpt_path}. Skipping cold eval.")
         return
