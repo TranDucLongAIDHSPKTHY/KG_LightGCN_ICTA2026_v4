@@ -193,7 +193,8 @@ class KGDataset(CFDataset):
         if self.kg_triples is None:
             return None
         n_triples = len(self.kg_triples)
-        idxs = self.rng.integers(0, n_triples, size=batch_size)
+        # idxs = self.rng.integers(0, n_triples, size=batch_size)
+        idxs = self.rng.randint(0, n_triples, size=batch_size)
         selected = self.kg_triples[idxs]  # [B, 3]
 
         heads    = selected[:, 0].tolist()
