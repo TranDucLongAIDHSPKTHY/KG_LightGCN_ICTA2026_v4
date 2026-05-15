@@ -128,13 +128,17 @@ python3 scripts/preprocess.py --dataset all
 python3 scripts/build_cold_split.py --dataset all --ratio 10 20 30
 
 # Train
-# Thay tên model: lightgcn, kgcl, kgat, simgcl, kg-lightgcn, kg-lightgcn-cl'''.
+# Thay tên model: 'kg_lightgcn', 'kg_lightgcn_cl', 'kgat', 'kgcl', 'lightgcn', 'simgcl','''.
 #Train 1 model/ 1 seeds
-python3 main.py --model lightgcn --dataset amazon-book --seeds 42
+python3 main.py --model kg_lightgcn_cl --dataset amazon-book --seeds 42
 
 # Train mỗi model 5 seeds
 python3 main.py --model all --dataset amazon-book --seeds 42 0 1 2 3
 ```
+
+#Train Cold-satrt
+'''
+python main.py --model kg_lightgcn --dataset amazon-book --cold_split cold_10 --seeds 42
 
 ## Note: Local: python3 -> python
 

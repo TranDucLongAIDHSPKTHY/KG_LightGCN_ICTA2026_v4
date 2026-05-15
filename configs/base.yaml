@@ -44,7 +44,7 @@ train:
   #   CPU-only (8-core)    → 6–8
   #   Server (32+ cores)   → 8–16
   #   Debug / Windows WSL  → 0  (tắt multiprocessing)
-  num_workers: 0
+  num_workers: 2
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 eval:

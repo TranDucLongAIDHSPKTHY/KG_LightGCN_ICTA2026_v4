@@ -6,6 +6,19 @@ Tối ưu cho dataset lớn (50K+ users, 90K+ items, 2M+ interactions):
   - Negative sampling batch (vectorised NumPy, không Python loop)
   - Adjacency matrix build bằng scipy sparse COO trực tiếp
   - Sparse tensor lưu ở CPU, chỉ chuyển lên device khi cần
+
+Worker-safe pickling (num_workers > 0 trên Windows)
+──────────────────────────────────────────────────
+torch.sparse_coo_tensor không thể pickle trực tiếp (gây lỗi
+"NotImplementedError: Cannot access storage of SparseTensorImpl"
+khi DataLoader spawn worker process trên Windows).
+
+__getstate__ / __setstate__ xử lý việc này:
+  - Khi pickle (gửi sang worker): norm_adj_mat được chuyển thành
+    3 numpy arrays (indices, values, shape) — hoàn toàn picklable.
+  - Khi worker nhận và unpickle (__setstate__): rebuild sparse tensor
+    từ các arrays đó.
+Toàn bộ transparent với phần còn lại của code.
 """
 
 import os
@@ -28,6 +41,8 @@ class CFDataset(BaseDataset, Dataset):
       - _build_adj_matrix(): dùng COO trực tiếp, không qua list comprehension
       - norm_adj_mat lưu ở CPU; model tự chuyển lên device trong forward()
       - train_users / pos_items_arr lưu riêng để sample nhanh hơn
+      - __getstate__ / __setstate__ để DataLoader worker pickle hoạt động
+        đúng trên mọi platform (Windows spawn / Linux fork)
     """
 
     def __init__(
@@ -137,6 +152,54 @@ class CFDataset(BaseDataset, Dataset):
         return torch.sparse_coo_tensor(
             indices, values, torch.Size(mx.shape)
         ).coalesce()
+
+    # ── Pickle support for DataLoader workers ─────────────────────────────────
+    #
+    # torch.sparse_coo_tensor không thể pickle qua multiprocessing spawn
+    # (Windows mặc định, macOS Python 3.8+).  Giải pháp: khi pickle, chuyển
+    # norm_adj_mat thành 3 numpy arrays; khi unpickle, rebuild lại từ chúng.
+    # Toàn bộ transparent với model và trainer.
+
+    def __getstate__(self) -> dict:
+        """
+        Được gọi khi pickle object (gửi sang DataLoader worker).
+        Chuyển norm_adj_mat sparse tensor → numpy arrays để picklable.
+        """
+        state = self.__dict__.copy()
+        if self.norm_adj_mat is not None:
+            t = self.norm_adj_mat.coalesce()
+            state["_adj_indices_np"] = t.indices().numpy()   # [2, nnz]
+            state["_adj_values_np"]  = t.values().numpy()    # [nnz]
+            state["_adj_size"]       = tuple(t.size())       # (N+M, N+M)
+        else:
+            state["_adj_indices_np"] = None
+            state["_adj_values_np"]  = None
+            state["_adj_size"]       = None
+        # Không pickle sparse tensor trực tiếp
+        state["norm_adj_mat"] = None
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """
+        Được gọi khi unpickle object (trong DataLoader worker).
+        Rebuild norm_adj_mat từ numpy arrays.
+        """
+        self.__dict__.update(state)
+        # Rebuild sparse tensor nếu có dữ liệu
+        if (
+            self._adj_indices_np is not None
+            and self._adj_values_np is not None
+            and self._adj_size is not None
+        ):
+            indices = torch.from_numpy(self._adj_indices_np)
+            values  = torch.from_numpy(self._adj_values_np)
+            self.norm_adj_mat = torch.sparse_coo_tensor(
+                indices, values, self._adj_size
+            ).coalesce()
+        # Dọn dẹp các key tạm
+        self.__dict__.pop("_adj_indices_np", None)
+        self.__dict__.pop("_adj_values_np",  None)
+        self.__dict__.pop("_adj_size",        None)
 
     # ── Negative sampling (vectorised) ────────────────────────────────────────
 

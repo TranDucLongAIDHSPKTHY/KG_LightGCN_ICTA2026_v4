@@ -310,7 +310,7 @@ def train_model(
                 split="train",
                 batch_size=cfg.get("train", {}).get("batch_size", 2048),
                 neg_samples=cfg.get("train", {}).get("neg_samples", 1),
-                num_workers=cfg.get("train", {}).get("num_workers", 4),
+                num_workers=cfg.get("train", {}).get("num_workers", 0),
                 seed=seed,
             )
 
@@ -339,7 +339,7 @@ def train_model(
                 batch_size=cfg.get("train", {}).get("batch_size", 2048),
                 neg_samples=cfg.get("train", {}).get("neg_samples", 1),
                 kg_type=cfg.get("dataset", {}).get("kg_type", "full"),
-                num_workers=cfg.get("train", {}).get("num_workers", 4),
+                num_workers=cfg.get("train", {}).get("num_workers", 0),
                 seed=seed,
             )
 
@@ -538,6 +538,8 @@ def main() -> None:
         overrides["model.embedding_dim"] = args.embedding_dim
     if args.weight_decay:
         overrides["train.weight_decay"] = args.weight_decay
+    if args.n_workers is not None:
+        overrides["train.num_workers"] = args.n_workers
 
     cfg = load_config(
         base_path=args.base_config,

@@ -3,6 +3,10 @@ datasets/dataloader.py
 ─────────────────────────────────────────────────────────────────────────────
 Factory functions for creating DataLoader objects for training and evaluation.
 Ensures consistent batch sizes and seeding across all models (fairness).
+
+num_workers > 0 hoạt động đúng trên mọi platform (Windows / Linux / macOS)
+vì CFDataset đã implement __getstate__ / __setstate__ để chuyển sparse tensor
+thành numpy arrays trước khi pickle sang worker process.
 """
 
 from typing import Optional
@@ -39,6 +43,8 @@ def get_cf_dataloader(
         neg_samples: Negatives per positive.
         seed:        Dataset RNG seed.
         num_workers: DataLoader workers (0 = main process).
+                     Giá trị > 0 hoạt động trên cả Windows nhờ
+                     __getstate__/__setstate__ trong CFDataset.
         shuffle:     Shuffle training data each epoch.
 
     Returns:
@@ -55,8 +61,9 @@ def get_cf_dataloader(
         batch_size=batch_size,
         shuffle=(shuffle and split == "train"),
         num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),  # pin_memory only valid with CUDA
-        worker_init_fn=worker_init_fn,
+        pin_memory=(torch.cuda.is_available() and num_workers > 0),
+        worker_init_fn=worker_init_fn if num_workers > 0 else None,
+        persistent_workers=(num_workers > 0),  # giữ worker alive giữa epochs
         drop_last=False,
     )
     return loader
@@ -100,8 +107,9 @@ def get_kg_dataloader(
         batch_size=batch_size,
         shuffle=(shuffle and split == "train"),
         num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),  # pin_memory only valid with CUDA
-        worker_init_fn=worker_init_fn,
+        pin_memory=(torch.cuda.is_available() and num_workers > 0),
+        worker_init_fn=worker_init_fn if num_workers > 0 else None,
+        persistent_workers=(num_workers > 0),  # giữ worker alive giữa epochs
         drop_last=False,
     )
     return loader

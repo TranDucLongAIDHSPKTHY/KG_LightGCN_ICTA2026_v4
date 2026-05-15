@@ -64,6 +64,9 @@ class Trainer:
         self.epochs        = train_cfg.get("epochs", 1000)
         self.patience      = train_cfg.get("early_stopping_patience", 20)
         self.monitor_metric= train_cfg.get("early_stopping_metric", "recall@20")
+        # num_workers từ config — giá trị thực tế có thể thấp hơn trên Windows
+        # (safe_num_workers trong dataloader.py tự động giảm về 0 nếu cần)
+        self.num_workers   = train_cfg.get("num_workers", 0)
 
         # eval_interval: evaluate mỗi N epoch (tiết kiệm thời gian với dataset lớn)
         self.eval_interval = eval_cfg.get("eval_interval", 10)
@@ -126,9 +129,20 @@ class Trainer:
         run_logger.info(f"  DATASET       : {self.dataset_name}")
         run_logger.info(f"  SEED          : {seed}")
         run_logger.info(f"  DEVICE        : {self.device}")
-        run_logger.info(f"  EPOCHS        : {self.epochs}  (patience={self.patience})")
+        run_logger.info(f"  EPOCHS        : {self.epochs}")
+        run_logger.info(f"  EARLY STOPPING: {self.patience}")
         run_logger.info(f"  LR / WD       : {self.lr} / {self.weight_decay}")
         run_logger.info(f"  LAYERS        : {self.model.n_layers}")
+        # Đọc num_workers thực tế từ DataLoader (có thể đã bị giảm về 0 trên Windows)
+        actual_workers = getattr(self.train_loader, "num_workers", self.num_workers)
+        cfg_workers    = self.num_workers
+        if actual_workers != cfg_workers:
+            run_logger.info(
+                f"  NUM_WORKERS   : {actual_workers}  "
+                f"(config={cfg_workers}, reduced: Windows/spawn không hỗ trợ sparse tensor pickle)"
+            )
+        else:
+            run_logger.info(f"  NUM_WORKERS   : {actual_workers}")
         run_logger.info(f"  EVAL INTERVAL : every {self.eval_interval} epochs")
         run_logger.info(f"  MONITOR       : {self.monitor_metric}")
         run_logger.info(f"  PARAMS        : {self.model.parameter_count():,}")
