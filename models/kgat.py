@@ -39,8 +39,17 @@ Fixes vs v4:
   [BUG-5] bi-interaction branch: original paper applies activation per layer
           and concatenates; the running-mean made it behave like LightGCN
           (no non-linearity across layers). Fixed: accumulate with concat.
+
+  [OOM-FIX] _compute_entity_embeddings(): amazon-book has 1.4M triples ×
+          120K entities. Computing _project() over ALL triples at once
+          allocates [1_404_422, D*Rd] = ~21 GB on GPU. Fixed with:
+          1. Chunked processing via CHUNK_SIZE (configurable, default 32768)
+          2. Chunked _project() helper to avoid large intermediary tensors
+          3. torch.cuda.empty_cache() + gc.collect() after epoch-level cache
+          4. KG tensors kept on CPU, moved to GPU chunk-by-chunk
 """
 
+import gc
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -48,6 +57,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.base_model import BaseModel
+
+
+# ── Tuneable constant: reduce if still OOM, increase for speed ────────────────
+# Memory cost ≈ CHUNK_SIZE × (D + Rd + D*Rd) × 4 bytes
+# At D=Rd=64, CHUNK_SIZE=32768 → ~256 MB per chunk (safe for 4 GB VRAM)
+# At D=Rd=64, CHUNK_SIZE=8192  → ~64 MB per chunk  (safe for 2 GB VRAM)
+_DEFAULT_CHUNK = 32_768
 
 
 class KGAT(BaseModel):
@@ -65,6 +81,8 @@ class KGAT(BaseModel):
         agg_type:      'bi-interaction' | 'gcn' | 'graphsage'.
         norm_adj:      User-item normalised adjacency [N+M, N+M].
         device:        Torch device.
+        chunk_size:    Triples processed per chunk in _compute_entity_embeddings.
+                       Reduce to 8192 if still OOM on low-VRAM GPUs.
     """
 
     def __init__(
@@ -79,23 +97,24 @@ class KGAT(BaseModel):
         agg_type: str = "bi-interaction",
         norm_adj: Optional[torch.Tensor] = None,
         device: Optional[torch.device] = None,
+        chunk_size: int = _DEFAULT_CHUNK,
     ) -> None:
         super().__init__(n_users, n_items, embedding_dim, device)
-        self.n_entities  = n_entities
-        self.n_relations = n_relations
+        self.n_entities   = n_entities
+        self.n_relations  = n_relations
         self.relation_dim = relation_dim
-        self.n_layers    = n_layers
-        self.agg_type    = agg_type
+        self.n_layers     = n_layers
+        self.agg_type     = agg_type
+        self.chunk_size   = chunk_size
 
         # ── Embeddings ────────────────────────────────────────────────────────
-        self.user_embedding   = nn.Embedding(n_users,    embedding_dim)
-        self.entity_embedding = nn.Embedding(n_entities, embedding_dim)
+        self.user_embedding     = nn.Embedding(n_users,    embedding_dim)
+        self.entity_embedding   = nn.Embedding(n_entities, embedding_dim)
         self.relation_embedding = nn.Embedding(n_relations, relation_dim)
         # TransR projection matrices W_r ∈ R^{D × Rd} per relation
         self.trans_w = nn.Embedding(n_relations, embedding_dim * relation_dim)
 
         # ── CF aggregation weights ────────────────────────────────────────────
-        # FIX [BUG-4]: GraphSAGE input is cat([E_k, nb]) → 2*D
         if agg_type == "bi-interaction":
             self.W_gc = nn.ModuleList([
                 nn.Linear(embedding_dim, embedding_dim, bias=False)
@@ -124,7 +143,6 @@ class KGAT(BaseModel):
         # ── KG Attention ──────────────────────────────────────────────────────
         # FIX [BUG-2]: attention uses projected head+relation in relation space
         # score = (W_r·e_t)^T · tanh(W_r·e_h + e_r)  ∈ R
-        # We implement this as a dot-product after tanh gating (Rd → 1)
         self.attn_V = nn.Linear(relation_dim, 1, bias=False)
 
         if norm_adj is not None:
@@ -133,7 +151,11 @@ class KGAT(BaseModel):
             self.norm_adj = None
 
         self.kg_adj: Dict[int, List[Tuple[int, int]]] = {}
-        self._kg_tensors = None
+
+        # [OOM-FIX] Store KG tensors on CPU; move to GPU chunk-by-chunk.
+        # Keeping 1.4M × 3 int64 tensors on GPU permanently wastes ~33 MB
+        # but more importantly forces all chunk ops onto already-pressured VRAM.
+        self._kg_tensors_cpu: Optional[Tuple[torch.Tensor, ...]] = None
 
         self._init_weights()
         nn.init.xavier_uniform_(self.trans_w.weight)
@@ -146,10 +168,32 @@ class KGAT(BaseModel):
         relation_id: torch.Tensor, # [B]
     ) -> torch.Tensor:
         """Project entity embedding into relation space: e_proj = e · W_r ∈ R^Rd."""
-        W = self.trans_w(relation_id)             # [B, D*Rd]
+        W = self.trans_w(relation_id)                          # [B, D*Rd]
         W = W.view(-1, self.embedding_dim, self.relation_dim)  # [B, D, Rd]
         proj = torch.bmm(entity_emb.unsqueeze(1), W).squeeze(1)  # [B, Rd]
         return proj
+
+    def _project_chunked(
+        self,
+        entity_emb: torch.Tensor,  # [N, D]  – full or sub-tensor (CPU or GPU)
+        relation_id: torch.Tensor, # [N]
+        chunk_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        [OOM-FIX] Chunked version of _project to avoid allocating [N, D*Rd]
+        in one shot.  Processes `chunk_size` rows at a time on `device`.
+        Input tensors may live on CPU; each chunk is moved to GPU on demand.
+        """
+        out_chunks = []
+        for start in range(0, entity_emb.size(0), chunk_size):
+            end = min(start + chunk_size, entity_emb.size(0))
+            e_chunk = entity_emb[start:end].to(device)    # [C, D]
+            r_chunk = relation_id[start:end].to(device)   # [C]
+            out_chunks.append(self._project(e_chunk, r_chunk).cpu())
+            # Immediately free GPU memory for this chunk
+            del e_chunk, r_chunk
+        return torch.cat(out_chunks, dim=0)  # [N, Rd] on CPU
 
     def kg_forward(
         self,
@@ -159,10 +203,10 @@ class KGAT(BaseModel):
         neg_tails: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """TransR scoring: ||h_r + r - t_r||^2."""
-        h    = self.entity_embedding(heads)
-        r    = self.relation_embedding(relations)
-        t_p  = self.entity_embedding(pos_tails)
-        t_n  = self.entity_embedding(neg_tails)
+        h   = self.entity_embedding(heads)
+        r   = self.relation_embedding(relations)
+        t_p = self.entity_embedding(pos_tails)
+        t_n = self.entity_embedding(neg_tails)
 
         h_r  = self._project(h, relations)
         tp_r = self._project(t_p, relations)
@@ -174,8 +218,11 @@ class KGAT(BaseModel):
 
     # ── Attentive KG aggregation ──────────────────────────────────────────────
 
-    def _build_kg_sparse_tensors(self, device: torch.device):
-        """Build vectorized head/tail/relation tensors from kg_adj."""
+    def _build_kg_sparse_tensors_cpu(self):
+        """
+        [OOM-FIX] Build head/tail/relation tensors and keep them on CPU.
+        They are moved to GPU chunk-by-chunk inside _compute_entity_embeddings.
+        """
         if not self.kg_adj:
             return None
         heads_list, tails_list, rels_list = [], [], []
@@ -187,14 +234,23 @@ class KGAT(BaseModel):
         if not heads_list:
             return None
         return (
-            torch.tensor(heads_list, dtype=torch.long, device=device),
-            torch.tensor(tails_list, dtype=torch.long, device=device),
-            torch.tensor(rels_list,  dtype=torch.long, device=device),
+            torch.tensor(heads_list, dtype=torch.long),  # CPU
+            torch.tensor(tails_list, dtype=torch.long),  # CPU
+            torch.tensor(rels_list,  dtype=torch.long),  # CPU
         )
 
     def _compute_entity_embeddings(self) -> torch.Tensor:
         """
-        Vectorized attention-based KG aggregation.
+        Vectorized + chunked attention-based KG aggregation.
+
+        [OOM-FIX] Original code called _project() on ALL 1.4M triples at once,
+        trying to allocate a [1_404_422, D*Rd] = [1.4M, 4096] tensor ≈ 21 GB.
+        This fix:
+          1. Keeps KG index tensors (heads/tails/rels) on CPU.
+          2. Processes triples in chunks of `self.chunk_size` rows.
+          3. Accumulates attention weights and aggregated embeddings on CPU,
+             then moves the final result to GPU once.
+          4. Explicitly frees GPU temporaries after each chunk.
 
         FIX [BUG-2]: KGAT attention (Eq.4 in paper):
             e_{(h,r,t)} = (W_r·e_t)^T · tanh(W_r·e_h + e_r)
@@ -203,55 +259,96 @@ class KGAT(BaseModel):
         if not self.kg_adj:
             return self.entity_embedding.weight
 
-        E      = self.entity_embedding.weight   # [n_entities, D]
-        device = E.device
+        device = self.entity_embedding.weight.device
 
-        if self._kg_tensors is None:
-            self._kg_tensors = self._build_kg_sparse_tensors(device)
-        if self._kg_tensors is None:
-            return E
+        # Lazy-build CPU tensors (only once; invalidated by set_kg_adj / .to())
+        if self._kg_tensors_cpu is None:
+            self._kg_tensors_cpu = self._build_kg_sparse_tensors_cpu()
+        if self._kg_tensors_cpu is None:
+            return self.entity_embedding.weight
 
-        heads_t, tails_t, rels_t = self._kg_tensors
-        heads_t = heads_t.to(device)
-        tails_t = tails_t.to(device)
-        rels_t  = rels_t.to(device)
+        heads_cpu, tails_cpu, rels_cpu = self._kg_tensors_cpu
+        E_total = heads_cpu.size(0)
 
-        h_emb = E[heads_t]                          # [E_total, D]
-        t_emb = E[tails_t]                          # [E_total, D]
-        r_emb = self.relation_embedding(rels_t)     # [E_total, Rd]
+        # Snapshot entity embeddings on CPU for chunk-by-chunk lookup.
+        # .detach().cpu() avoids keeping the whole weight tensor on GPU
+        # across chunk iterations.
+        E_cpu = self.entity_embedding.weight.detach().cpu()  # [n_entities, D]
 
-        # Project head and tail into relation space
-        h_proj = self._project(h_emb, rels_t)       # [E_total, Rd]
-        t_proj = self._project(t_emb, rels_t)       # [E_total, Rd]
+        # Accumulation buffers (CPU) — final move to GPU at the end.
+        attn_exp_cpu  = torch.zeros(E_total)           # [E_total]
+        attn_sum_cpu  = torch.zeros(self.n_entities)   # per-head denominator
+        aggregated_cpu = torch.zeros_like(E_cpu)       # [n_entities, D]
 
-        # FIX [BUG-2]: attention score = (W_r·e_t)^T · tanh(W_r·e_h + e_r)
-        gate       = torch.tanh(h_proj + r_emb)    # [E_total, Rd]
-        attn_raw   = self.attn_V(t_proj * gate).squeeze(-1)  # [E_total]
+        chunk = self.chunk_size
 
-        # Softmax per head (scatter-based stable softmax)
-        # FIX: stable per-head softmax using only scatter_add_ (PyTorch >= 1.6).
-        # scatter_reduce_(reduce='amax') requires PyTorch >= 2.0 — avoid it.
-        # We use a two-pass scatter approach:
-        #   Pass 1: compute per-head max with torch.zeros + scatter_add of a
-        #           clamped indicator — too complex.  Instead: use the fact that
-        #           attn_V output has bounded range (tanh gate, linear output)
-        #           so simply subtract the global max of attn_raw for stability.
-        attn_raw = attn_raw - attn_raw.max()   # global max shift — safe, no per-head API needed
-        attn_exp = torch.exp(attn_raw)          # [E_total], all positive
+        # ── Pass 1: compute exp(attn_raw) per chunk ───────────────────────────
+        # We must compute per-head softmax, but need two passes over the data:
+        #   pass-1 → accumulate exp(score) per head
+        #   pass-2 → normalise and aggregate tail embeddings
+        # To avoid storing all raw scores (1.4M floats = fine, ~5 MB), we store
+        # attn_exp_cpu across chunks.
+        for start in range(0, E_total, chunk):
+            end = min(start + chunk, E_total)
 
-        attn_sum = torch.zeros(self.n_entities, device=device)
-        attn_sum.scatter_add_(0, heads_t, attn_exp)
-        attn_norm = attn_exp / (attn_sum[heads_t] + 1e-8)   # [E_total]
+            h_idx = heads_cpu[start:end]   # [C] – CPU long
+            t_idx = tails_cpu[start:end]   # [C]
+            r_idx = rels_cpu[start:end]    # [C]
 
-        # Weighted aggregation of tail embeddings (in original D space)
-        aggregated = torch.zeros_like(E)
-        aggregated.scatter_add_(
-            0,
-            heads_t.unsqueeze(1).expand(-1, self.embedding_dim),
-            attn_norm.unsqueeze(1) * t_emb,
-        )
+            h_emb = E_cpu[h_idx].to(device)  # [C, D] – GPU
+            t_emb = E_cpu[t_idx].to(device)  # [C, D]
+            r_idx_gpu = r_idx.to(device)     # [C]
 
-        return E + aggregated   # residual
+            r_emb = self.relation_embedding(r_idx_gpu)  # [C, Rd]
+
+            # _project is cheap for chunk C << 1.4M
+            h_proj = self._project(h_emb, r_idx_gpu)   # [C, Rd]
+            t_proj = self._project(t_emb, r_idx_gpu)   # [C, Rd]
+
+            gate     = torch.tanh(h_proj + r_emb)       # [C, Rd]
+            raw      = self.attn_V(t_proj * gate).squeeze(-1)  # [C]
+
+            exp_vals = torch.exp(raw - raw.max()).cpu()  # [C] – back to CPU
+            attn_exp_cpu[start:end] = exp_vals
+
+            # Accumulate per-head sum on CPU
+            attn_sum_cpu.scatter_add_(0, h_idx, exp_vals)
+
+            # Free GPU temps immediately
+            del h_emb, t_emb, r_emb, h_proj, t_proj, gate, raw, exp_vals, r_idx_gpu
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        # ── Pass 2: normalise and aggregate tail embeddings ───────────────────
+        for start in range(0, E_total, chunk):
+            end = min(start + chunk, E_total)
+
+            h_idx = heads_cpu[start:end]
+            t_idx = tails_cpu[start:end]
+
+            exp_vals   = attn_exp_cpu[start:end]          # [C] CPU
+            denom      = attn_sum_cpu[h_idx] + 1e-8       # [C] CPU
+            attn_norm  = (exp_vals / denom).unsqueeze(1)  # [C, 1] CPU
+
+            t_emb_cpu  = E_cpu[t_idx]                     # [C, D] CPU
+            weighted   = attn_norm * t_emb_cpu            # [C, D] CPU
+
+            aggregated_cpu.scatter_add_(
+                0,
+                h_idx.unsqueeze(1).expand(-1, self.embedding_dim),
+                weighted,
+            )
+            del weighted, t_emb_cpu, attn_norm, exp_vals, denom
+
+        # ── Final: residual connection, move result to GPU ────────────────────
+        result_cpu = E_cpu + aggregated_cpu           # [n_entities, D] residual
+        result_gpu = result_cpu.to(device)
+
+        # Release CPU buffers
+        del E_cpu, attn_exp_cpu, attn_sum_cpu, aggregated_cpu, result_cpu
+        gc.collect()
+
+        return result_gpu  # [n_entities, D]
 
     # ── CF propagation ────────────────────────────────────────────────────────
 
@@ -270,17 +367,16 @@ class KGAT(BaseModel):
         item_e = entity_emb[: self.n_items]
         E0     = torch.cat([self.user_embedding.weight, item_e], dim=0)
 
-        _dev   = self.user_embedding.weight.device
-        adj    = self.norm_adj.to(_dev)
+        _dev = self.user_embedding.weight.device
+        adj  = self.norm_adj.to(_dev)
 
-        E_k    = E0
-        layer_outputs = []   # collect per-layer output for concatenation
+        E_k           = E0
+        layer_outputs = []  # collect per-layer output for concatenation
 
         for l in range(self.n_layers):
             nb = torch.sparse.mm(adj, E_k)
 
             if self.agg_type == "bi-interaction":
-                # Eq. in KGAT: e^{l+1} = LeakyReLU(W_gc*(e+nb)) + LeakyReLU(W_bi*(e⊙nb))
                 E_k = (
                     F.leaky_relu(self.W_gc[l](E_k + nb))
                     + F.leaky_relu(self.W_bi[l](E_k * nb))
@@ -291,13 +387,12 @@ class KGAT(BaseModel):
             else:  # gcn
                 E_k = F.leaky_relu(self.W_gc[l](nb))
 
-            # L2 normalise after each layer (KGAT paper, Section 3.3)
             E_k = F.normalize(E_k, dim=-1)
             layer_outputs.append(E_k)
 
         # FIX [BUG-3]: KGAT final embedding = concat all layer outputs → W_out
-        E_concat = torch.cat(layer_outputs, dim=-1)          # [N+M, K*D]
-        E_final  = self.W_out(E_concat)                      # [N+M, D]
+        E_concat = torch.cat(layer_outputs, dim=-1)  # [N+M, K*D]
+        E_final  = self.W_out(E_concat)              # [N+M, D]
 
         return E_final[: self.n_users], E_final[self.n_users :]
 
@@ -339,16 +434,16 @@ class KGAT(BaseModel):
 
     def set_kg_adj(self, kg_adj: Dict[int, List[Tuple[int, int]]]) -> None:
         self.kg_adj = kg_adj
-        self._kg_tensors = None
+        self._kg_tensors_cpu = None  # [OOM-FIX] invalidate CPU cache
 
     def to(self, *args, **kwargs):
-        self._kg_tensors = None
+        self._kg_tensors_cpu = None  # [OOM-FIX] reset on device change
         return super().to(*args, **kwargs)
 
     def cuda(self, device=None):
-        self._kg_tensors = None
+        self._kg_tensors_cpu = None
         return super().cuda(device)
 
     def cpu(self):
-        self._kg_tensors = None
+        self._kg_tensors_cpu = None
         return super().cpu()

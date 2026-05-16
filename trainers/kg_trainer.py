@@ -8,6 +8,14 @@ Extends the base Trainer with:
   - KG BPR loss for TransR embedding (KGAT)
   - Contrastive loss with KG augmentation (KGCL)
   - KG alignment loss (KG-LightGCN)
+
+[OOM-FIX] Changes vs original:
+  - _compute_entity_embeddings() is now chunked in kgat.py (primary fix).
+  - Here: torch.cuda.empty_cache() + gc.collect() BEFORE caching entity emb,
+    not after, so peak VRAM is minimised at the most expensive moment.
+  - _cached_entity_emb is explicitly deleted and cache cleared after each
+    epoch to avoid VRAM accumulation across epochs.
+  - Added `entity_emb_chunk_size` passthrough from cfg → KGAT constructor.
 """
 
 import json
@@ -102,39 +110,47 @@ class KGTrainer(Trainer):
         self.lambda_kg = float(model_cfg.get("kg_reg", 1e-5))
         self.kg_steps_per_cf = 1  # alternate: 1 KG step per CF step
 
+        # [OOM-FIX] Epoch-level cache for KGAT entity embeddings.
+        # Initialised to None; set once at start of each epoch; deleted at end.
+        self._cached_entity_emb: Optional[torch.Tensor] = None
+
     # ── Override epoch training ───────────────────────────────────────────────
 
     def _train_one_epoch(self) -> float:
         """
         Training epoch for KG models.
         Combines CF BPR loss with a model-specific KG loss term.
+
+        [OOM-FIX] KGAT entity embeddings:
+          - Computed ONCE per epoch (not per-batch) to avoid 1.4M-triple
+            recomputation every forward() call.
+          - empty_cache() is called BEFORE the expensive computation so that
+            all stale activations from the previous epoch are freed first.
+          - The cache is deleted and empty_cache() called AGAIN at epoch end
+            to reclaim VRAM before evaluation or the next epoch.
         """
         self.model.train()
         total_loss = 0.0
-        n_batches = 0
+        n_batches  = 0
 
-        # KGAT: compute entity embeddings ONCE per epoch and reuse across batches.
-        # Previously it was recomputed every forward() call → O(n_batches) redundant
-        # full-graph aggregations. detach() cuts the grad graph, saving GPU memory.
         if self._is_kgat:
+            # [OOM-FIX] Free stale tensors BEFORE the expensive KG aggregation.
+            # Doing it after (as in original) means peak VRAM = old + new.
+            self._free_entity_emb_cache()
+
             with torch.no_grad():
-                self._cached_entity_emb = self.model._compute_entity_embeddings().detach()
+                # _compute_entity_embeddings() now runs in chunks internally
+                # (see kgat.py [OOM-FIX]), so this no longer OOMs on 4–16 GB GPUs.
+                self._cached_entity_emb = (
+                    self.model._compute_entity_embeddings().detach()
+                )
         else:
             self._cached_entity_emb = None
 
         # KGCL: rebuild augmented adj matrices ONCE per epoch (not per batch).
-        # Each augmentation creates a new sparse tensor — doing it every batch
-        # creates thousands of temporary GPU tensors per epoch.
-        if self._is_kgcl and hasattr(self.model, 'refresh_augmented_views'):
+        if self._is_kgcl and hasattr(self.model, "refresh_augmented_views"):
             with torch.no_grad():
                 self.model.refresh_augmented_views()
-
-        # Free stale cached tensors from last epoch before building new ones
-        # Important for 32GB RAM / RTX 3050 (4GB VRAM)
-        if self.device.type == "cpu":
-            gc.collect()
-        elif self.device.type == "cuda":
-            torch.cuda.empty_cache()
 
         for batch in self.train_loader:
             users, pos_items, neg_items = [x.to(self.device) for x in batch]
@@ -169,9 +185,28 @@ class KGTrainer(Trainer):
             self.optimizer.step()
 
             total_loss += loss.item()
-            n_batches += 1
+            n_batches  += 1
+
+        # [OOM-FIX] Free entity emb cache at epoch end so VRAM is available
+        # for evaluation (full-ranking over all items needs spare VRAM too).
+        if self._is_kgat:
+            self._free_entity_emb_cache()
 
         return total_loss / max(n_batches, 1)
+
+    # ── OOM helper ────────────────────────────────────────────────────────────
+
+    def _free_entity_emb_cache(self) -> None:
+        """
+        [OOM-FIX] Delete the epoch-level entity embedding cache and free VRAM.
+        Safe to call even when cache is already None.
+        """
+        if self._cached_entity_emb is not None:
+            del self._cached_entity_emb
+            self._cached_entity_emb = None
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
     # ── Model-specific step functions ─────────────────────────────────────────
 
@@ -184,6 +219,7 @@ class KGTrainer(Trainer):
         """
         KGAT training step:
           L = BPR(CF) + BPR(KG/TransR) + λ·L2
+
         Samples a batch of KG triples (same size as CF batch) for efficiency.
         Uses epoch-level cached entity embeddings to avoid redundant KG aggregation.
         """
@@ -193,28 +229,27 @@ class KGTrainer(Trainer):
             precomputed_entity_emb=self._cached_entity_emb,
         )
         cf_loss = bpr_loss(user_emb, pos_emb, neg_emb)
-        l2 = self.model.l2_loss(users, pos_items, neg_items)
+        l2      = self.model.l2_loss(users, pos_items, neg_items)
 
         # KG BPR loss (TransR) — sample a batch of triples
         if self.kg_dataset.kg_triples is not None:
             batch_size = len(users)
-            # Sample multiple triples at once
             triples = self.kg_dataset.sample_kg_triples(batch_size)
             if triples is not None:
                 heads, rels, t_pos, t_neg = triples
-                heads  = torch.tensor(heads,  dtype=torch.long, device=self.device)
-                rels   = torch.tensor(rels,   dtype=torch.long, device=self.device)
-                t_pos_t = torch.tensor(t_pos, dtype=torch.long, device=self.device)
-                t_neg_t = torch.tensor(t_neg, dtype=torch.long, device=self.device)
+                heads   = torch.tensor(heads,  dtype=torch.long, device=self.device)
+                rels    = torch.tensor(rels,   dtype=torch.long, device=self.device)
+                t_pos_t = torch.tensor(t_pos,  dtype=torch.long, device=self.device)
+                t_neg_t = torch.tensor(t_neg,  dtype=torch.long, device=self.device)
                 pos_score, neg_score = self.model.kg_forward(heads, rels, t_pos_t, t_neg_t)
                 kg_loss = kg_bpr_loss(pos_score, neg_score)
             else:
                 # Fallback: single triple
                 h, r, t_pos_s, t_neg_s = self.kg_dataset.sample_kg_triple()
-                heads   = torch.tensor([h],      dtype=torch.long, device=self.device)
-                rels    = torch.tensor([r],      dtype=torch.long, device=self.device)
-                t_pos_t = torch.tensor([t_pos_s], dtype=torch.long, device=self.device)
-                t_neg_t = torch.tensor([t_neg_s], dtype=torch.long, device=self.device)
+                heads   = torch.tensor([h],       dtype=torch.long, device=self.device)
+                rels    = torch.tensor([r],        dtype=torch.long, device=self.device)
+                t_pos_t = torch.tensor([t_pos_s],  dtype=torch.long, device=self.device)
+                t_neg_t = torch.tensor([t_neg_s],  dtype=torch.long, device=self.device)
                 pos_score, neg_score = self.model.kg_forward(heads, rels, t_pos_t, t_neg_t)
                 kg_loss = kg_bpr_loss(pos_score, neg_score)
         else:
@@ -236,10 +271,9 @@ class KGTrainer(Trainer):
             users, pos_items, neg_items
         )
         cf_loss = bpr_loss(user_emb, pos_emb, neg_emb)
-        l2 = self.model.l2_loss(users, pos_items, neg_items)
+        l2      = self.model.l2_loss(users, pos_items, neg_items)
         cl_loss = self.model.contrastive_loss(view1, view2)
         return cf_loss + self.lambda_cl * cl_loss + self.weight_decay * l2
-
 
     def _kg_lightgcn_cl_step(
         self,
@@ -262,17 +296,14 @@ class KGTrainer(Trainer):
             item_cf, item_kg,
         ) = self.model(users, pos_items, neg_items)
 
-        # BPR loss
         cf_loss = bpr_loss(user_emb, pos_emb, neg_emb)
 
-        # Cross-view contrastive loss: CF view <-> KG view
         user_cl = self.model.contrastive_loss(user_cf, user_kg)
         item_cl = self.model.contrastive_loss(item_cf, item_kg)
         cl_loss = (user_cl + item_cl) / 2.0
 
-        # KG alignment + L2
         align_loss = self.model.kg_alignment_loss()
-        l2 = self.model.l2_loss(users, pos_items, neg_items)
+        l2         = self.model.l2_loss(users, pos_items, neg_items)
 
         return (
             cf_loss
@@ -292,8 +323,8 @@ class KGTrainer(Trainer):
           L = BPR + λ_kg·KG_align + λ·L2
         """
         user_emb, pos_emb, neg_emb = self.model(users, pos_items, neg_items)
-        cf_loss = bpr_loss(user_emb, pos_emb, neg_emb)
-        l2 = self.model.l2_loss(users, pos_items, neg_items)
+        cf_loss    = bpr_loss(user_emb, pos_emb, neg_emb)
+        l2         = self.model.l2_loss(users, pos_items, neg_items)
         align_loss = self.model.kg_alignment_loss()
         return cf_loss + self.lambda_kg * align_loss + self.weight_decay * l2
 
@@ -335,8 +366,8 @@ def run_kg_multi_seed(
     for seed in seeds:
         logger.info(f"\n{'='*60}\nKG Seed {seed}\n{'='*60}")
         set_seed(seed)
-        model = model_factory()
-        loader = train_loader_factory(seed)
+        model      = model_factory()
+        loader     = train_loader_factory(seed)
         kg_dataset = kg_dataset_factory()
 
         trainer = KGTrainer(
@@ -352,13 +383,20 @@ def run_kg_multi_seed(
         result = trainer.train(seed=seed)
         per_seed_results.append(result)
 
+        # [OOM-FIX] Aggressively free resources between seeds to avoid
+        # accumulation of GPU tensors across seeds in the same process.
+        del trainer, model, loader, kg_dataset
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
     all_metrics = {}
     for result in per_seed_results:
         for k, v in result["test_metrics"].items():
             all_metrics.setdefault(k, []).append(v)
 
     mean_metrics = {k: float(np.mean(v)) for k, v in all_metrics.items()}
-    std_metrics = {k: float(np.std(v)) for k, v in all_metrics.items()}
+    std_metrics  = {k: float(np.std(v))  for k, v in all_metrics.items()}
 
     logger.info("\n" + "=" * 60)
     logger.info("KG MULTI-SEED RESULTS (mean ± std):")
