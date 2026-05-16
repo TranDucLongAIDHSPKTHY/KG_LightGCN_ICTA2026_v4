@@ -1035,8 +1035,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset", choices=["amazon-book", "yelp2018", "all"], default="all"
     )
-    parser.add_argument("--raw_dir", default="data/raw")
-    parser.add_argument("--out_dir", default="data/processed")
+    parser.add_argument("--raw_dir", default="/data/phuongtran/raw") # data/raw
+    parser.add_argument("--out_dir", default="/data/phuongtran/processed") # data/processed
     return parser.parse_args()
 
 

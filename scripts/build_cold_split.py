@@ -454,7 +454,7 @@ def parse_args() -> argparse.Namespace:
         "--ratio", nargs="+", type=int, default=[10, 20, 30],
         help="Phan tram cold items. Mac dinh: 10 20 30"
     )
-    parser.add_argument("--data_dir", default="data/processed")
+    parser.add_argument("--data_dir", default="/data/phuongtran/processed") # data/processed
     parser.add_argument("--seed", type=int, default=COLD_SEED)
     return parser.parse_args()
 

@@ -295,7 +295,7 @@ def parse_args() -> argparse.Namespace:
         choices=["amazon-book", "yelp2018", "all"],
         default="all",
     )
-    parser.add_argument("--raw_dir", default="data/raw")
+    parser.add_argument("--raw_dir", default="/data/phuongtran/raw") # data/raw
     parser.add_argument(
         "--check_only",
         action="store_true",
