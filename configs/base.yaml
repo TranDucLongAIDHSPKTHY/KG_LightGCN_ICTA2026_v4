@@ -17,7 +17,7 @@
 # ── Dataset ───────────────────────────────────────────────────────────────────
 dataset:
   name: amazon-book # amazon-book | yelp2018
-  data_dir: /data/phuongtran/processed
+  data_dir: /data/phuongtran/processed # data/processed
   cold_split: null # null | cold_10 | cold_20 | cold_30
   kg_type: full # full | category | brand | none
 

@@ -62,14 +62,14 @@ class Trainer:
         self.lr            = train_cfg.get("learning_rate", 1e-3)
         self.weight_decay  = train_cfg.get("weight_decay", 1e-4)
         self.epochs        = train_cfg.get("epochs", 1000)
-        self.patience      = train_cfg.get("early_stopping_patience", 20)
+        self.patience      = train_cfg.get("early_stopping_patience", 10)
         self.monitor_metric= train_cfg.get("early_stopping_metric", "recall@20")
         # num_workers từ config — giá trị thực tế có thể thấp hơn trên Windows
         # (safe_num_workers trong dataloader.py tự động giảm về 0 nếu cần)
         self.num_workers   = train_cfg.get("num_workers", 0)
 
         # eval_interval: evaluate mỗi N epoch (tiết kiệm thời gian với dataset lớn)
-        self.eval_interval = eval_cfg.get("eval_interval", 10)
+        self.eval_interval = eval_cfg.get("eval_interval", 5)
         # log_interval: log loss mỗi N epoch
         self.log_interval  = log_cfg.get("log_interval", 1)
 
@@ -156,6 +156,7 @@ class Trainer:
         running_loss = 0.0
         running_n    = 0
         start_epoch  = 1
+        epoch_times: List[float] = []  # lưu thời gian mỗi epoch để tính ETA
 
         # ── Resume from checkpoint (if available) ────────────────────────────
         ckpt_path = self._get_checkpoint_path(seed)
@@ -186,8 +187,14 @@ class Trainer:
 
             # Log loss mỗi log_interval epoch (nhẹ)
             if epoch % self.log_interval == 0:
+                epoch_times.append(elapsed)
+                _window = epoch_times[-10:]  # trung bình trượt 10 epoch gần nhất
+                avg_epoch_time = sum(_window) / len(_window)
+                remaining = self.epochs - epoch
+                eta_sec = avg_epoch_time * remaining
+                eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_sec))
                 run_logger.info(
-                    f"  [Epoch {epoch:>4}]  loss={loss:.4f}  ({elapsed:.1f}s)"
+                    f"  [Epoch {epoch}/{self.epochs}] loss={loss:.4f} | {elapsed:.1f}s | ETA (max)={eta_str}"
                 )
 
             # Evaluate mỗi eval_interval epoch
