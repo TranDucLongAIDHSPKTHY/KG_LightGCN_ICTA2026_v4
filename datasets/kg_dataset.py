@@ -168,11 +168,11 @@ class KGDataset(CFDataset):
         """
         if self.kg_triples is None:
             raise RuntimeError("KG triples not loaded.")
-        idx = self.rng.integers(0, len(self.kg_triples))
+        idx = self.rng.randint(0, len(self.kg_triples))
         h, r, t_pos = self.kg_triples[idx]
         # Corrupt tail
         while True:
-            t_neg = int(self.rng.integers(0, self.n_entities))
+            t_neg = int(self.rng.randint(0, self.n_entities))
             if t_neg != t_pos:
                 break
         return int(h), int(r), int(t_pos), int(t_neg)
@@ -193,7 +193,7 @@ class KGDataset(CFDataset):
         if self.kg_triples is None:
             return None
         n_triples = len(self.kg_triples)
-        # idxs = self.rng.integers(0, n_triples, size=batch_size)
+        # idxs = self.rng.randint(0, n_triples, size=batch_size)
         idxs = self.rng.randint(0, n_triples, size=batch_size)
         selected = self.kg_triples[idxs]  # [B, 3]
 
@@ -202,7 +202,7 @@ class KGDataset(CFDataset):
         t_pos    = selected[:, 2].tolist()
 
         # Corrupt tails (vectorized)
-        t_neg = self.rng.integers(0, self.n_entities, size=batch_size)
+        t_neg = self.rng.randint(0, self.n_entities, size=batch_size)
         # Ensure neg != pos (fix collisions)
         collision = t_neg == selected[:, 2]
         t_neg[collision] = (t_neg[collision] + 1) % self.n_entities
