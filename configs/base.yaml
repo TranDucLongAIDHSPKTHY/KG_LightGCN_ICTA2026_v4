@@ -35,7 +35,7 @@ train:
   optimizer: adam
   weight_decay: 1.0e-4 # LightGCN/KGCL default; SimGCL overrides to 0; KGAT to 1e-5
   neg_samples: 1
-  early_stopping_patience: 10 # KGCL overrides to 5
+  early_stopping_patience: 5 # KGCL overrides to 5  # sau 5 lần eval recall không cải thiện sẽ dừng, (lưu ý rằng eval_interval=5 nên sẽ đánh giá sau mỗi 5 epoch, tức là tối đa 25 epoch không cải thiện mới dừng)
   early_stopping_metric: recall@20
   seed: 42
   device: auto # auto | cpu | cuda | cuda:0

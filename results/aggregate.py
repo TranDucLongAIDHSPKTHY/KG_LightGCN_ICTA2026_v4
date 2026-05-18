@@ -70,7 +70,7 @@ def rows_to_csv(rows: List[Dict], metrics: List[str]) -> str:
     return "\n".join(lines)
 
 
-def rows_to_latex(rows: List[Dict], metrics: List[str]) -> str:
+def rows_to_latex(rows: List[Dict], metrics: List[str], dataset: str) -> str:
     """Generate a LaTeX booktabs table."""
     col_fmt = "l" + "c" * len(metrics)
     header_cols = " & ".join(m.replace("@", "@") for m in metrics)
@@ -104,7 +104,7 @@ def rows_to_latex(rows: List[Dict], metrics: List[str]) -> str:
     lines += [
         "\\bottomrule",
         "\\end{tabular}",
-        f"\\caption{{Main results on {dataset}}}",
+        f"\\caption{{Main results on {dataset}}}", 
         "\\end{table}",
     ]
     return "\n".join(lines)
@@ -136,7 +136,7 @@ def main():
     logger.info(f"CSV table saved: {csv_path}")
 
     # LaTeX
-    latex_str = rows_to_latex(rows, METRICS)
+    latex_str = rows_to_latex(rows, METRICS, dataset)
     tex_path = os.path.join(result_dir, f"main_results_{dataset}.tex")
     with open(tex_path, "w") as f:
         f.write(latex_str)

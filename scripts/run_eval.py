@@ -69,7 +69,7 @@ def main() -> None:
 
     device = get_device(cfg)
     data_dir = os.path.join(
-        cfg.get("dataset", {}).get("data_dir", "data/processed"),
+        cfg.get("dataset", {}).get("data_dir", "/data/phuongtran/processed"),
         args.dataset,
     )
 

@@ -29,7 +29,7 @@ python scripts/build_cold_split.py --dataset "$DATASET" --ratio 10 20 30 \
 
 # Step 3: Train all models (multi-seed)
 echo "[3/5] Training all models ..."
-MODELS="lightgcn simgcl kg_lightgcn kg_lightgcn_cl"
+MODELS="lightgcn kg_lightgcn "
 
 # Only KG models on amazon-book
 if [ "$DATASET" = "amazon-book" ]; then

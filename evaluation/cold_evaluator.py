@@ -101,7 +101,8 @@ def cold_start_eval(
         k_eff = min(max_k, len(cold_item_list))
         _, ranked_local = torch.topk(scores, k=k_eff, dim=-1)
         # Convert local cold indices back to global item IDs
-        ranked_global = cold_item_tensor[ranked_local.cpu()].numpy()  # [B, k]
+        # ranked_global = cold_item_tensor[ranked_local.cpu()].numpy()  # [B, k]
+        ranked_global = cold_item_tensor.cpu()[ranked_local.cpu()].numpy()
 
         for local_i, uid in enumerate(batch_users):
             all_ranked.append(ranked_global[local_i])

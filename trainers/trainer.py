@@ -464,7 +464,7 @@ def run_multi_seed(
     device: torch.device,
     seeds: Optional[List[int]] = None,
     checkpoint_dir: str = "results/checkpoints",
-    log_dir: str = "results/logs",
+    log_dir: str = "results/logs", 
 ) -> Dict[str, Any]:
     """Multi-seed training + aggregate results."""
     if seeds is None:
