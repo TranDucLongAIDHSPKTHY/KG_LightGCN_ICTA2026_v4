@@ -25,7 +25,7 @@ model:
   apply_item_cl: false # paper also CL on items; false for user-only (faster)
 
 train:
-  weight_decay: 0.0 # FIXED: SimGCL paper/QRec uses L2=0 (not 1e-4)
+  weight_decay: 0.0 # FIXED: SimGCL paper/QRec uses L2=0 on embeddings (no weight decay)
 
 contrastive:
   temperature: 0.2 # τ; paper: 0.2 (sensitive — don't change to 0.1)

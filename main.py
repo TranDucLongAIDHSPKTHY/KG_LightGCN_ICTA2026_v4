@@ -72,7 +72,7 @@ def get_data_dir(cfg: dict, cold_split: Optional[str] = None) -> str:
     Không hard-code path — dùng .env để chỉ định nơi lưu dataset.
     """
     # data_dir đã được resolve bởi config.py (DATA_ROOT → dataset.data_dir)
-    data_dir = cfg.get("dataset", {}).get("data_dir", "data/processed")
+    data_dir = cfg.get("dataset", {}).get("data_dir", "/data/phuongtran/processed")  # data/processed
     dataset_name = cfg.get("dataset", {}).get("name", "amazon-book")
     base = os.path.join(data_dir, dataset_name)
     if cold_split:
@@ -425,7 +425,7 @@ def _run_cold_eval(
     test_d = dataset.read_interaction_file(os.path.join(data_dir, "test.txt"))
 
     cold_evaluator = ColdEvaluator(
-        cold_dir=cold_dir,
+        cold_dir_or_items=cold_dir,
         train_user2items=train_d,
         test_user2items=test_d,
         n_items=dataset.n_items,
