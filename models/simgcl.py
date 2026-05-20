@@ -5,36 +5,19 @@ SimGCL: Are Graph Augmentations Necessary? Simple Graph Contrastive Learning
 for Recommendation.
 Yu et al., SIGIR 2022 — https://arxiv.org/abs/2112.08679
 
-Key idea: augment graph embeddings by adding uniform noise ε at each layer,
-then use InfoNCE contrastive loss between the two noisy views.
+Fixes vs previous version:
+  [BUG-S1-FIX] forward() luôn trả về tuple cố định 7 phần tử:
+               (user_emb, pos_emb, neg_emb, u1, u2, i1, i2)
+               khi apply_item_cl=True, hoặc 5 phần tử khi False.
+               Trainer bây giờ unpack an toàn bằng cách kiểm tra len().
 
-Loss = BPR + λ · InfoNCE(view1, view2)
+  [BUG-S2-NOTE] Paper SimGCL dùng CÙNG perturbed view cho BPR và CL:
+               - Thực tế QRec/paper code: BPR dùng clean embedding,
+                 2 CL views dùng perturb=True. Giữ nguyên hành vi này.
+               - Không share clean embedding với CL view để tránh
+                 information leak (clean + perturbed ≠ hai independent views).
 
-Fixes vs v4:
-  [BUG-1] Noise generation was wrong.
-          Old code:
-              noise = torch.rand_like(E_k) * 2 - 1   # uniform in [-1, 1]
-              noise = F.normalize(noise, dim=-1) * self.eps
-          This normalises to unit vector then scales by eps, making noise
-          magnitude exactly eps for every node — not "uniform noise" as
-          described in the paper.
-
-          SimGCL paper (Eq.4): add uniform noise directly to each dimension:
-              ε ~ Uniform(-eps, eps)   per element
-          i.e. each embedding dimension gets an independent ±eps perturbation.
-          Fixed:
-              noise = (torch.rand_like(E_k) * 2 - 1) * self.eps
-          NO normalisation — this matches the paper's uniform noise formulation.
-
-  [BUG-2] The two augmented views for CL only propagated user embeddings
-          (u1, _) discarding item views. The paper uses the SAME perturbed
-          forward pass for both user and item CL, but in the original QRec
-          implementation the CL is applied symmetrically on users only for
-          efficiency. This is kept as-is (users only) but documented.
-
-  [BUG-3] InfoNCE uses only user views, not item views.
-          Original SimGCL paper also applies CL on items. We add
-          optional item_cl (disabled by default for compatibility).
+  Giữ nguyên [BUG-1] fix: noise = (rand*2-1)*eps (uniform, no normalize).
 """
 
 from typing import Optional, Tuple
@@ -49,18 +32,6 @@ from models.base_model import BaseModel
 class SimGCL(BaseModel):
     """
     SimGCL: Simple Graph Contrastive Learning for Recommendation.
-
-    Args:
-        n_users:       Number of users.
-        n_items:       Number of items.
-        embedding_dim: Embedding dimension.
-        n_layers:      LightGCN layers.
-        eps:           Noise magnitude for uniform augmentation (per element).
-        temperature:   InfoNCE temperature τ.
-        lambda_cl:     Contrastive loss weight λ.
-        apply_item_cl: If True, also compute InfoNCE on item views (paper default).
-        norm_adj:      Normalised adjacency sparse tensor.
-        device:        Torch device.
     """
 
     def __init__(
@@ -77,10 +48,10 @@ class SimGCL(BaseModel):
         device: Optional[torch.device] = None,
     ) -> None:
         super().__init__(n_users, n_items, embedding_dim, device)
-        self.n_layers     = n_layers
-        self.eps          = eps
-        self.temperature  = temperature
-        self.lambda_cl    = lambda_cl
+        self.n_layers      = n_layers
+        self.eps           = eps
+        self.temperature   = temperature
+        self.lambda_cl     = lambda_cl
         self.apply_item_cl = apply_item_cl
 
         self.user_embedding = nn.Embedding(n_users, embedding_dim)
@@ -93,7 +64,7 @@ class SimGCL(BaseModel):
 
         self._init_weights()
 
-    # ── Graph propagation (with or without noise) ─────────────────────────────
+    # ── Graph propagation ─────────────────────────────────────────────────────
 
     def _propagate(
         self, perturb: bool = False
@@ -101,9 +72,7 @@ class SimGCL(BaseModel):
         """
         LightGCN-style propagation with optional per-layer uniform noise.
 
-        FIX [BUG-1]: noise is now independent uniform per element:
-            ε_i ~ Uniform(-eps, eps)   (no normalisation)
-        which matches SimGCL paper Eq.4.
+        [BUG-1-FIX] Uniform noise per element: ε ~ Uniform(-eps, eps).
         """
         _dev = self.user_embedding.weight.device
         adj  = self.norm_adj.to(_dev)
@@ -114,7 +83,6 @@ class SimGCL(BaseModel):
         for _ in range(self.n_layers):
             E_k = torch.sparse.mm(adj, E_k)
             if perturb:
-                # FIX [BUG-1]: uniform noise in [-eps, eps], independent per dim
                 noise = (torch.rand_like(E_k) * 2 - 1) * self.eps
                 E_k   = E_k + noise
             acc = acc + E_k
@@ -131,21 +99,21 @@ class SimGCL(BaseModel):
         neg_items: torch.Tensor,
     ) -> Tuple[torch.Tensor, ...]:
         """
-        Returns BPR embeddings + two augmented views for CL loss.
+        Returns BPR embeddings + augmented views for CL loss.
 
-        When apply_item_cl=False (default):
-            returns (user_emb, pos_emb, neg_emb, user_view1, user_view2)
-        When apply_item_cl=True:
-            returns (user_emb, pos_emb, neg_emb,
-                     user_view1, user_view2, item_view1, item_view2)
+        [BUG-S1-FIX] Luôn trả về tuple có kích thước nhất quán:
+          apply_item_cl=False (default): (user_emb, pos, neg, u1, u2)        — 5 tensors
+          apply_item_cl=True:            (user_emb, pos, neg, u1, u2, i1, i2) — 7 tensors
+
+        Trainer._train_one_epoch() kiểm tra len() trước khi unpack.
         """
-        # Clean propagation (shared for BPR)
+        # Clean propagation cho BPR
         user_emb, item_emb = self._propagate(perturb=False)
         u_emb = user_emb[users]
         p_emb = item_emb[pos_items]
         n_emb = item_emb[neg_items]
 
-        # Two augmented views
+        # Hai augmented views (perturbed, independent)
         u1, i1 = self._propagate(perturb=True)
         u2, i2 = self._propagate(perturb=True)
 
@@ -162,15 +130,7 @@ class SimGCL(BaseModel):
         view1: torch.Tensor,
         view2: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Symmetric InfoNCE loss between two views.
-
-        Args:
-            view1: [B, D]
-            view2: [B, D]
-        Returns:
-            Scalar loss.
-        """
+        """Symmetric InfoNCE loss between two views."""
         v1  = F.normalize(view1, dim=-1)
         v2  = F.normalize(view2, dim=-1)
         sim = torch.matmul(v1, v2.T) / self.temperature

@@ -2,10 +2,11 @@
 trainers/trainer.py
 ─────────────────────────────────────────────────────────────────────────────
 Base trainer cho CF models (LightGCN, SimGCL).
-Tối ưu cho dataset lớn:
-  - eval_interval: chỉ evaluate mỗi N epoch (default=5), không phải mỗi epoch
-  - log_interval: log loss mỗi epoch (nhẹ, không ảnh hưởng tốc độ)
-  - Checkpoint lưu theo model/dataset/seed riêng
+
+Fixes vs previous version:
+  [BUG-S1-FIX] _train_one_epoch(): SimGCL forward có thể trả về 5 hoặc 7
+               tensors tùy apply_item_cl. Unpack bằng cách kiểm tra len()
+               thay vì hardcode 5. Tính item_cl nếu có.
 """
 
 import json
@@ -30,10 +31,7 @@ logger = get_logger("trainer")
 
 
 class Trainer:
-    """
-    Base trainer cho LightGCN / SimGCL.
-    Tối ưu cho dataset lớn với eval_interval để không evaluate mỗi epoch.
-    """
+    """Base trainer cho LightGCN / SimGCL."""
 
     def __init__(
         self,
@@ -59,18 +57,14 @@ class Trainer:
         eval_cfg  = cfg.get("eval", {})
         log_cfg   = cfg.get("logging", {})
 
-        self.lr            = train_cfg.get("learning_rate", 1e-3)
-        self.weight_decay  = train_cfg.get("weight_decay", 1e-4)
-        self.epochs        = train_cfg.get("epochs", 1000)
-        self.patience      = train_cfg.get("early_stopping_patience", 10)
-        self.monitor_metric= train_cfg.get("early_stopping_metric", "recall@20")
-        # num_workers từ config — giá trị thực tế có thể thấp hơn trên Windows
-        # (safe_num_workers trong dataloader.py tự động giảm về 0 nếu cần)
-        self.num_workers   = train_cfg.get("num_workers", 0)
+        self.lr             = train_cfg.get("learning_rate", 1e-3)
+        self.weight_decay   = train_cfg.get("weight_decay", 1e-4)
+        self.epochs         = train_cfg.get("epochs", 1000)
+        self.patience       = train_cfg.get("early_stopping_patience", 10)
+        self.monitor_metric = train_cfg.get("early_stopping_metric", "recall@20")
+        self.num_workers    = train_cfg.get("num_workers", 0)
 
-        # eval_interval: evaluate mỗi N epoch (tiết kiệm thời gian với dataset lớn)
         self.eval_interval = eval_cfg.get("eval_interval", 5)
-        # log_interval: log loss mỗi N epoch
         self.log_interval  = log_cfg.get("log_interval", 1)
 
         cl_cfg = cfg.get("contrastive", {})
@@ -84,7 +78,6 @@ class Trainer:
             self.model.parameters(), lr=self.lr, weight_decay=0.0
         )
 
-        # Phát hiện loại model
         self._is_simgcl = (
             hasattr(model, "contrastive_loss")
             and not hasattr(model, "kg_forward")
@@ -94,13 +87,7 @@ class Trainer:
     # ── Training loop ──────────────────────────────────────────────────────────
 
     def train(self, seed: int = 42) -> Dict[str, Any]:
-        """
-        Full training loop với early stopping và eval_interval.
-        Hỗ trợ resume từ checkpoint (nếu có file checkpoint với cùng model/dataset/seed).
-
-        Returns:
-            {seed, best_epoch, val_metric, test_metrics, history}
-        """
+        """Full training loop với early stopping và eval_interval."""
         set_seed(seed)
         t_start = time.time()
 
@@ -133,16 +120,8 @@ class Trainer:
         run_logger.info(f"  EARLY STOPPING: {self.patience}")
         run_logger.info(f"  LR / WD       : {self.lr} / {self.weight_decay}")
         run_logger.info(f"  LAYERS        : {self.model.n_layers}")
-        # Đọc num_workers thực tế từ DataLoader (có thể đã bị giảm về 0 trên Windows)
         actual_workers = getattr(self.train_loader, "num_workers", self.num_workers)
-        cfg_workers    = self.num_workers
-        if actual_workers != cfg_workers:
-            run_logger.info(
-                f"  NUM_WORKERS   : {actual_workers}  "
-                f"(config={cfg_workers}, reduced: Windows/spawn không hỗ trợ sparse tensor pickle)"
-            )
-        else:
-            run_logger.info(f"  NUM_WORKERS   : {actual_workers}")
+        run_logger.info(f"  NUM_WORKERS   : {actual_workers}")
         run_logger.info(f"  EVAL INTERVAL : every {self.eval_interval} epochs")
         run_logger.info(f"  MONITOR       : {self.monitor_metric}")
         run_logger.info(f"  PARAMS        : {self.model.parameter_count():,}")
@@ -156,9 +135,9 @@ class Trainer:
         running_loss = 0.0
         running_n    = 0
         start_epoch  = 1
-        epoch_times: List[float] = []  # lưu thời gian mỗi epoch để tính ETA
+        epoch_times: List[float] = []
 
-        # ── Resume from checkpoint (if available) ────────────────────────────
+        # Resume from checkpoint
         ckpt_path = self._get_checkpoint_path(seed)
         if os.path.exists(ckpt_path):
             try:
@@ -185,10 +164,9 @@ class Trainer:
             running_loss += loss
             running_n    += 1
 
-            # Log loss mỗi log_interval epoch (nhẹ)
             if epoch % self.log_interval == 0:
                 epoch_times.append(elapsed)
-                _window = epoch_times[-10:]  # trung bình trượt 10 epoch gần nhất
+                _window = epoch_times[-10:]
                 avg_epoch_time = sum(_window) / len(_window)
                 remaining = self.epochs - epoch
                 eta_sec = avg_epoch_time * remaining
@@ -197,7 +175,6 @@ class Trainer:
                     f"  [Epoch {epoch}/{self.epochs}] loss={loss:.4f} | {elapsed:.1f}s | ETA (max)={eta_str}"
                 )
 
-            # Evaluate mỗi eval_interval epoch
             if epoch % self.eval_interval == 0:
                 val_metrics  = self.evaluator.evaluate(self.model, split="val")
                 monitor_val  = val_metrics.get(self.monitor_metric, 0.0)
@@ -210,7 +187,6 @@ class Trainer:
                     {"epoch": epoch, "loss": avg_loss, **val_metrics, "time_s": elapsed}
                 )
 
-                # Release unused memory (important on 32GB RAM / CPU-only)
                 if self.device.type == "cpu":
                     gc.collect()
                 elif self.device.type == "cuda":
@@ -238,7 +214,6 @@ class Trainer:
                         f"  [eval {epoch}]  {self.monitor_metric}={monitor_val:.6f}  "
                         f"(patience {patience_ctr}/{self.patience})"
                     )
-                    # Save periodic checkpoint (every 10 eval steps) for resume
                     self._save_periodic_checkpoint(
                         seed, epoch, val_metrics,
                         best_metric=best_metric,
@@ -254,11 +229,9 @@ class Trainer:
                         )
                         break
 
-        # Restore best weights
         if best_state is not None:
             self.model.load_state_dict(best_state)
 
-        # Final test evaluation
         test_metrics = self.evaluator.evaluate(self.model, split="test")
         total_time   = time.time() - t_start
 
@@ -297,14 +270,22 @@ class Trainer:
             self.optimizer.zero_grad()
 
             if self._is_simgcl:
-                user_emb, pos_emb, neg_emb, view1, view2 = self.model(
-                    users, pos_items, neg_items
-                )
-                loss = (
-                    bpr_loss(user_emb, pos_emb, neg_emb)
-                    + self.weight_decay * self.model.l2_loss(users, pos_items, neg_items)
-                    + self.lambda_cl * infonce_loss(view1, view2, self.temperature)
-                )
+                # [BUG-S1-FIX] Unpack an toàn bằng cách kiểm tra len()
+                output = self.model(users, pos_items, neg_items)
+                user_emb, pos_emb, neg_emb = output[0], output[1], output[2]
+                view1, view2 = output[3], output[4]
+
+                rec_loss = bpr_loss(user_emb, pos_emb, neg_emb)
+                reg_loss = self.model.l2_loss(users, pos_items, neg_items)
+                cl_loss  = infonce_loss(view1, view2, self.temperature)
+
+                # Nếu có item views (apply_item_cl=True)
+                if len(output) == 7:
+                    item_view1, item_view2 = output[5], output[6]
+                    item_cl = infonce_loss(item_view1, item_view2, self.temperature)
+                    cl_loss = (cl_loss + item_cl) / 2.0
+
+                loss = rec_loss + self.weight_decay * reg_loss + self.lambda_cl * cl_loss
             else:
                 user_emb, pos_emb, neg_emb = self.model(users, pos_items, neg_items)
                 loss = (
@@ -322,12 +303,10 @@ class Trainer:
     # ── Checkpoint ────────────────────────────────────────────────────────────
 
     def _get_checkpoint_path(self, seed: int) -> str:
-        """Return path to the periodic (resume) checkpoint for this seed."""
         ckpt_dir = os.path.join(self.checkpoint_dir, self.dataset_name, self.model_name)
         return os.path.join(ckpt_dir, f"seed{seed}_resume.pt")
 
     def _get_best_checkpoint_path(self, seed: int) -> str:
-        """Return path to the best-model checkpoint for this seed."""
         ckpt_dir = os.path.join(self.checkpoint_dir, self.dataset_name, self.model_name)
         return os.path.join(ckpt_dir, f"seed{seed}_best.pt")
 
@@ -341,10 +320,6 @@ class Trainer:
         patience_ctr: int = 0,
         history: Optional[list] = None,
     ) -> None:
-        """
-        Save best-model checkpoint (includes full training state for resume).
-        This overwrites only when a new best is found.
-        """
         ckpt_dir = os.path.join(self.checkpoint_dir, self.dataset_name, self.model_name)
         os.makedirs(ckpt_dir, exist_ok=True)
         path = self._get_best_checkpoint_path(seed)
@@ -361,7 +336,6 @@ class Trainer:
             "model_name":   self.model_name,
             "dataset_name": self.dataset_name,
         }, path)
-        # Also update the resume checkpoint so it always points to best
         self._save_periodic_checkpoint(
             seed, epoch, metrics,
             best_metric=best_metric,
@@ -380,15 +354,9 @@ class Trainer:
         patience_ctr: int = 0,
         history: Optional[list] = None,
     ) -> None:
-        """
-        Save periodic checkpoint (for resume after crash).
-        Written every eval step so training can be resumed from the last eval epoch.
-        Stores full training state: model weights, optimizer state, epoch, patience counter.
-        """
         ckpt_dir = os.path.join(self.checkpoint_dir, self.dataset_name, self.model_name)
         os.makedirs(ckpt_dir, exist_ok=True)
         path = self._get_checkpoint_path(seed)
-        # Load the best model state dict if available (to restore after resume)
         best_path = self._get_best_checkpoint_path(seed)
         best_state_for_resume = None
         if os.path.exists(best_path):
@@ -414,39 +382,21 @@ class Trainer:
         }, path)
 
     def _load_checkpoint_for_resume(self, path: str) -> Dict[str, Any]:
-        """
-        Load a resume checkpoint.  Restores model weights, optimizer state,
-        and training metadata (epoch, patience counter, best metric, history).
-
-        Returns the checkpoint dict (caller uses epoch, best_metric, etc.).
-        Raises on incompatible checkpoint.
-        """
         ckpt = torch.load(path, map_location=self.device)
-
-        # Validate checkpoint is for the same model/dataset
         if ckpt.get("model_name") and ckpt["model_name"] != self.model_name:
             raise ValueError(
                 f"Checkpoint model_name mismatch: "
                 f"expected '{self.model_name}', got '{ckpt['model_name']}'"
             )
-
         self.model.load_state_dict(ckpt["model_state_dict"])
-
-        # Also restore best model state so we can keep tracking improvements
-        if ckpt.get("best_model_state_dict"):
-            # We keep best_state inside training loop; load here just to restore model
-            pass
-
         if ckpt.get("optimizer_state_dict"):
             try:
                 self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             except Exception:
                 logger.warning("Could not restore optimizer state (ignoring).")
-
         return ckpt
 
     def load_checkpoint(self, path: str) -> None:
-        """Public API: load a best-model checkpoint for inference."""
         ckpt = torch.load(path, map_location=self.device)
         self.model.load_state_dict(ckpt["model_state_dict"])
         logger.info(
@@ -464,7 +414,7 @@ def run_multi_seed(
     device: torch.device,
     seeds: Optional[List[int]] = None,
     checkpoint_dir: str = "results/checkpoints",
-    log_dir: str = "results/logs", 
+    log_dir: str = "results/logs",
 ) -> Dict[str, Any]:
     """Multi-seed training + aggregate results."""
     if seeds is None:
@@ -494,7 +444,6 @@ def run_multi_seed(
     mean_m = {k: float(np.mean(v)) for k, v in all_metrics.items()}
     std_m  = {k: float(np.std(v))  for k, v in all_metrics.items()}
 
-    # Lưu multi-seed summary
     dataset_name = cfg.get("dataset", {}).get("name", "unknown")
     model_name   = model_factory().__class__.__name__.lower()
     _save_multiseed_summary(model_name, dataset_name, seeds, mean_m, std_m, log_dir)

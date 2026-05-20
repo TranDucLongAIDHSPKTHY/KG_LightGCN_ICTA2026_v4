@@ -4,20 +4,26 @@ models/kgcl.py
 KGCL: Knowledge Graph Contrastive Learning for Recommendation
 Yang et al., SIGIR 2022 — https://arxiv.org/abs/2205.00976
 
-Fixes vs v4:
-  [BUG-1] get_embeddings(): `adj` was undefined (NameError).
-          Fixed: use self.norm_adj inside get_embeddings.
-  [BUG-2] _kg_propagation(): relation embeddings were completely ignored.
-          KGCL (Eq.5): m_{h←t,r} = e_t ⊙ e_r  (element-wise gate by relation).
-          Fixed: incorporate relation embeddings via set_kg_edges().
-  [BUG-3] _augment_adj(): keep-probability formula was wrong.
-          Old: p_keep = item_keep + (1 - drop_prob)  → always > 1, no dropout.
-          Fixed: p_keep = drop_prob + (1 - drop_prob)*degree  ∈ [drop_prob, 1].
+Fixes vs previous version:
+  [BUG-C2-FIX] forward(): bổ sung item_view1, item_view2 để KGTrainer
+               tính cả user CL lẫn item CL đúng theo paper Eq.(9).
+               Version cũ chỉ trả về user views → item CL bị bỏ qua hoàn toàn.
+
+  [BUG-C3-FIX] _augment_adj() và set_kg_norm_adj(): KG adjacency phải được
+               normalize D^{-1/2} A D^{-1/2} trước khi dùng cho message
+               passing. Version cũ dùng raw (0/1) adjacency → embedding
+               diverge sau vài epoch.
+
+  Giữ nguyên các fixes cũ:
+  [BUG-1] get_embeddings(): dùng self.norm_adj.
+  [BUG-2] _kg_propagation(): relation-aware gate (e_t ⊙ e_r).
+  [BUG-3] _augment_adj(): p_keep formula đúng.
 """
 
 from typing import Optional, Tuple
 
 import numpy as np
+import scipy.sparse as sp
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -36,21 +42,21 @@ class KGCL(BaseModel):
         n_layers: int = 3,
         kg_n_layers: int = 2,
         temp: float = 0.2,
-        lambda_kg: float = 0.5,
+        lambda_kg: float = 0.1,
         norm_adj: Optional[torch.Tensor] = None,
         kg_triples: Optional[np.ndarray] = None,
         device: Optional[torch.device] = None,
     ) -> None:
         super().__init__(n_users, n_items, embedding_dim, device)
-        self.n_entities = n_entities
+        self.n_entities  = n_entities
         self.n_relations = n_relations
-        self.n_layers = n_layers
+        self.n_layers    = n_layers
         self.kg_n_layers = kg_n_layers
-        self.temp = temp
-        self.lambda_kg = lambda_kg
+        self.temp        = temp
+        self.lambda_kg   = lambda_kg
 
-        self.user_embedding = nn.Embedding(n_users, embedding_dim)
-        self.entity_embedding = nn.Embedding(n_entities, embedding_dim)
+        self.user_embedding     = nn.Embedding(n_users,    embedding_dim)
+        self.entity_embedding   = nn.Embedding(n_entities, embedding_dim)
         self.relation_embedding = nn.Embedding(n_relations, embedding_dim)
 
         if norm_adj is not None:
@@ -62,10 +68,9 @@ class KGCL(BaseModel):
         if kg_triples is not None:
             self._build_kg_degree(kg_triples, n_entities)
 
-        # Per-edge KG tensors for relation-aware propagation
         self._kg_heads: Optional[torch.Tensor] = None
         self._kg_tails: Optional[torch.Tensor] = None
-        self._kg_rels: Optional[torch.Tensor] = None
+        self._kg_rels:  Optional[torch.Tensor] = None
 
         self._init_weights()
 
@@ -87,12 +92,9 @@ class KGCL(BaseModel):
         """
         Relation-aware message passing (KGCL Eq.5):
             m_{h←(t,r)} = e_t ⊙ e_r
-            e_h' = mean_aggregation(m) with residual + L2-norm
-        Falls back to simple mean via kg_norm_adj if edge tensors not set.
         """
-        E = self.entity_embedding.weight  # [n_entities, D]
+        E = self.entity_embedding.weight
 
-        # FIX [BUG-2]: relation-aware path
         if (self._kg_heads is not None
                 and self._kg_tails is not None
                 and self._kg_rels is not None):
@@ -103,9 +105,9 @@ class KGCL(BaseModel):
 
             E_k = E
             for _ in range(self.kg_n_layers):
-                t_emb = E_k[tails]                              # [E_kg, D]
-                r_emb = self.relation_embedding(rels)           # [E_kg, D]
-                msgs  = t_emb * r_emb                          # element-wise gate
+                t_emb = E_k[tails]
+                r_emb = self.relation_embedding(rels)
+                msgs  = t_emb * r_emb
 
                 agg   = torch.zeros_like(E_k)
                 count = torch.zeros(self.n_entities, device=device)
@@ -116,7 +118,7 @@ class KGCL(BaseModel):
 
             return E_k
 
-        # Fallback: simple LightGCN-style mean over kg_norm_adj
+        # Fallback: LightGCN-style mean
         if hasattr(self, "kg_norm_adj") and self.kg_norm_adj is not None:
             _dev = self.user_embedding.weight.device
             adj  = self.kg_norm_adj.to(_dev)
@@ -147,10 +149,7 @@ class KGCL(BaseModel):
     # ── KG-guided augmentation ────────────────────────────────────────────────
 
     def _augment_adj(self, adj: torch.Tensor, drop_prob: float = 0.1) -> torch.Tensor:
-        """
-        KG-guided edge dropout.
-        FIX [BUG-3]: p_keep = drop_prob + (1 - drop_prob) * degree ∈ [drop_prob, 1].
-        """
+        """KG-guided edge dropout. [BUG-3] p_keep formula đã được fix."""
         if self.item_kg_degree is None:
             return self._random_edge_drop(adj, drop_prob)
 
@@ -169,7 +168,6 @@ class KGCL(BaseModel):
         item_node   = torch.where(row_is_item, rows - n_u, cols - n_u)
         item_node   = item_node.clamp(0, len(item_keep) - 1)
 
-        # FIX: correct keep probability formula
         p_keep = drop_prob + (1.0 - drop_prob) * item_keep[item_node]
         p_keep = torch.where(has_item, p_keep, torch.ones_like(p_keep))
         p_keep = p_keep.clamp(0.0, 1.0)
@@ -210,7 +208,17 @@ class KGCL(BaseModel):
     ) -> Tuple[
         torch.Tensor, torch.Tensor, torch.Tensor,
         torch.Tensor, torch.Tensor,
+        torch.Tensor, torch.Tensor,
     ]:
+        """
+        [BUG-C2-FIX] Trả về cả user views lẫn item views để KGTrainer
+        tính đầy đủ CL loss theo paper Eq.(9).
+
+        Returns:
+            user_emb, pos_emb, neg_emb  — cho BPR
+            u1, u2                      — user view 1 và 2 (CL)
+            i1, i2                      — item view 1 và 2 (CL, pos_items)
+        """
         _dev = self.user_embedding.weight.device
         adj  = self.norm_adj.to(_dev)
         entity_emb = self._kg_propagation()
@@ -221,19 +229,25 @@ class KGCL(BaseModel):
         _aug2 = getattr(self, '_aug_adj2', None)
         adj1  = _aug1 if _aug1 is not None else self._augment_adj(adj)
         adj2  = _aug2 if _aug2 is not None else self._augment_adj(adj)
-        u1, _ = self._cf_propagation(adj1, entity_emb)
-        u2, _ = self._cf_propagation(adj2, entity_emb)
+
+        u1, i1 = self._cf_propagation(adj1, entity_emb)
+        u2, i2 = self._cf_propagation(adj2, entity_emb)
 
         return (
-            user_emb[users], item_emb[pos_items], item_emb[neg_items],
-            u1[users], u2[users],
+            user_emb[users],
+            item_emb[pos_items],
+            item_emb[neg_items],
+            u1[users],
+            u2[users],
+            i1[pos_items],   # [BUG-C2-FIX] thêm item view 1
+            i2[pos_items],   # [BUG-C2-FIX] thêm item view 2
         )
 
     def get_embeddings(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        """FIX [BUG-1]: `adj` was undefined. Now correctly uses self.norm_adj."""
+        """[BUG-1-FIX] Dùng self.norm_adj."""
         with torch.no_grad():
             _dev = self.user_embedding.weight.device
-            adj  = self.norm_adj.to(_dev)          # FIX
+            adj  = self.norm_adj.to(_dev)
             entity_emb = self._kg_propagation()
             return self._cf_propagation(adj, entity_emb)
 
@@ -261,6 +275,11 @@ class KGCL(BaseModel):
         self.register_buffer("norm_adj", norm_adj)
 
     def set_kg_norm_adj(self, kg_norm_adj: torch.Tensor) -> None:
+        """
+        [BUG-C3-FIX] Nhận vào adjacency đã được normalize D^{-1/2} A D^{-1/2}.
+        Caller (main.py/build_kgcl) phải truyền vào normalized sparse tensor,
+        không phải raw adjacency.
+        """
         self.register_buffer("kg_norm_adj", kg_norm_adj)
 
     def set_kg_edges(
@@ -269,13 +288,6 @@ class KGCL(BaseModel):
         tails: torch.Tensor,
         rels: torch.Tensor,
     ) -> None:
-        """
-        Set per-edge KG tensors for relation-aware propagation.
-        Args:
-            heads: [E_kg] head entity indices (long).
-            tails: [E_kg] tail entity indices (long).
-            rels:  [E_kg] relation indices (long).
-        """
         self._kg_heads = heads
         self._kg_tails = tails
         self._kg_rels  = rels

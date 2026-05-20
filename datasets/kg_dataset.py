@@ -2,8 +2,15 @@
 datasets/kg_dataset.py
 ─────────────────────────────────────────────────────────────────────────────
 Knowledge Graph Dataset extending CFDataset.
-Adds KG triple loading, entity/relation mappings, and KG adjacency structures
-needed by KGAT, KGCL, and KG-LightGCN.
+
+Fixes vs previous version:
+  [BUG-C3-FIX] build_kg_sparse_adj() trả về raw (0/1) adjacency không được
+               normalize → khi dùng cho message passing trong KGCL, embedding
+               bị scale sai → diverge.
+               Fix: thêm build_kg_norm_adj() trả về D^{-1/2} A D^{-1/2}
+               đã normalize đúng chuẩn. Caller (main.py/build_kgcl và
+               build_kg_lightgcn) nên gọi build_kg_norm_adj() thay vì
+               build_kg_sparse_adj() + _sparse_mx_to_torch().
 """
 
 import json
@@ -39,14 +46,6 @@ class KGDataset(CFDataset):
         kg_type: str = "full",
         seed: int = 42,
     ) -> None:
-        """
-        Args:
-            data_dir:    Path to processed dataset directory.
-            split:       'train' | 'val' | 'test'.
-            neg_samples: Negatives per positive for BPR.
-            kg_type:     'full' | 'category' | 'brand' | 'none'.
-            seed:        RNG seed.
-        """
         self.kg_type = kg_type
         self.n_entities: int = 0
         self.n_relations: int = 0
@@ -58,7 +57,6 @@ class KGDataset(CFDataset):
     # ── Override load to also load KG ─────────────────────────────────────────
 
     def load(self) -> None:
-        """Load CF data (via parent) then load KG."""
         super().load()
         if self.kg_type != "none":
             self._load_kg()
@@ -66,8 +64,6 @@ class KGDataset(CFDataset):
     # ── KG loading ────────────────────────────────────────────────────────────
 
     def _load_kg(self) -> None:
-        """Load KG triples and entity map from disk."""
-        # Support KGAT repo (kg_full.txt built by preprocess.py from kg_final.txt)
         kg_filename = {
             "full":     "kg_full.txt",
             "category": "kg_category.txt",
@@ -78,10 +74,9 @@ class KGDataset(CFDataset):
         if not os.path.exists(kg_path):
             raise FileNotFoundError(
                 f"KG file not found: {kg_path}. "
-                "Run scripts/preprocess.py first (Amazon-Book required for KG)."
+                "Run scripts/preprocess.py first."
             )
 
-        # Read triples
         triples: List[Tuple[int, int, int]] = []
         with open(kg_path, "r") as f:
             for line in f:
@@ -94,18 +89,14 @@ class KGDataset(CFDataset):
 
         self.kg_triples = np.array(triples, dtype=np.int64)
 
-        # Entity/relation counts
         all_entities = set(self.kg_triples[:, 0]) | set(self.kg_triples[:, 2])
         self.n_entities = max(all_entities) + 1
         self.n_relations = int(self.kg_triples[:, 1].max()) + 1
 
-        # Load entity→item mapping (saved by preprocess.py)
         entity_map_path = os.path.join(self.data_dir, "item2entity.json")
         if os.path.exists(entity_map_path):
             with open(entity_map_path, "r") as f:
                 raw_map = json.load(f)
-            # item2entity.json format (KGAT repo):
-            #   key = new_item_id (str), value = kg_entity_id
             for item_str, entity_id in raw_map.items():
                 item_id = int(item_str)
                 if item_id < self.n_items:
@@ -128,9 +119,7 @@ class KGDataset(CFDataset):
     # ── KG adjacency structures ───────────────────────────────────────────────
 
     def build_kg_adj_list(self) -> Dict[int, List[Tuple[int, int]]]:
-        """
-        Build head → [(tail, relation), …] adjacency list for KGAT/KGCL.
-        """
+        """Build head → [(tail, relation), …] adjacency list for KGAT/KGCL."""
         adj: Dict[int, List[Tuple[int, int]]] = {}
         if self.kg_triples is None:
             return adj
@@ -140,8 +129,11 @@ class KGDataset(CFDataset):
 
     def build_kg_sparse_adj(self) -> sp.csr_matrix:
         """
-        Build a sparse entity–entity adjacency matrix from KG triples.
+        Build a raw (un-normalized) entity–entity adjacency matrix.
         Shape: [n_entities, n_entities].
+
+        WARNING: Raw adjacency. Cho KGCL/KGLightGCN message passing,
+        dùng build_kg_norm_adj() để lấy D^{-1/2} A D^{-1/2} đã normalize.
         """
         if self.kg_triples is None:
             return sp.csr_matrix((self.n_entities, self.n_entities))
@@ -152,25 +144,60 @@ class KGDataset(CFDataset):
             (data, (heads, tails)),
             shape=(self.n_entities, self.n_entities),
         )
-        # Symmetrize
         mat = mat + mat.T
         mat.data[:] = 1.0
         return mat
 
-    # ── KG triple sampling (for TransR / KG embedding losses) ─────────────────
-
-    def sample_kg_triple(self) -> Tuple[int, int, int, int]:
+    def build_kg_norm_adj(self) -> torch.Tensor:
         """
-        Sample one positive KG triple and one corrupted (negative) triple.
+        [BUG-C3-FIX] Build D^{-1/2} A D^{-1/2} normalized KG adjacency.
+
+        Dùng cho KGCL và KG-LightGCN message passing qua KG entity graph.
+        Không dùng raw adjacency (entity emb bị scale sai và diverge).
 
         Returns:
-            (head, relation, pos_tail, neg_tail)
+            torch.sparse_coo_tensor [n_entities, n_entities] trên CPU.
         """
+        if self.kg_triples is None:
+            return torch.sparse_coo_tensor(
+                torch.zeros((2, 0), dtype=torch.long),
+                torch.zeros(0),
+                (self.n_entities, self.n_entities),
+            ).coalesce()
+
+        heads = self.kg_triples[:, 0]
+        tails = self.kg_triples[:, 2]
+        data  = np.ones(len(heads), dtype=np.float32)
+
+        # Symmetrize: A = R + R^T
+        A = sp.csr_matrix(
+            (data, (heads, tails)),
+            shape=(self.n_entities, self.n_entities),
+        )
+        A = (A + A.T).tocsr()
+
+        # D^{-1/2}
+        deg = np.asarray(A.sum(axis=1)).flatten()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            d_inv_sqrt = np.where(deg > 0, np.power(deg, -0.5), 0.0).astype(np.float32)
+        D_inv_sqrt = sp.diags(d_inv_sqrt)
+        A_hat = (D_inv_sqrt @ A @ D_inv_sqrt).tocoo().astype(np.float32)
+
+        indices = torch.from_numpy(
+            np.vstack([A_hat.row, A_hat.col]).astype(np.int64)
+        )
+        values = torch.from_numpy(A_hat.data)
+        return torch.sparse_coo_tensor(
+            indices, values, (self.n_entities, self.n_entities)
+        ).coalesce()
+
+    # ── KG triple sampling ─────────────────────────────────────────────────────
+
+    def sample_kg_triple(self) -> Tuple[int, int, int, int]:
         if self.kg_triples is None:
             raise RuntimeError("KG triples not loaded.")
         idx = self.rng.randint(0, len(self.kg_triples))
         h, r, t_pos = self.kg_triples[idx]
-        # Corrupt tail
         while True:
             t_neg = int(self.rng.randint(0, self.n_entities))
             if t_neg != t_pos:
@@ -180,35 +207,18 @@ class KGDataset(CFDataset):
     def sample_kg_triples(
         self, batch_size: int
     ) -> Optional[Tuple[List[int], List[int], List[int], List[int]]]:
-        """
-        Sample a batch of KG triples (positive + corrupted negative) efficiently.
-
-        Args:
-            batch_size: Number of triples to sample.
-
-        Returns:
-            (heads, relations, pos_tails, neg_tails) each as a list of ints,
-            or None if KG triples are not loaded.
-        """
         if self.kg_triples is None:
             return None
         n_triples = len(self.kg_triples)
-        # idxs = self.rng.randint(0, n_triples, size=batch_size)
         idxs = self.rng.randint(0, n_triples, size=batch_size)
-        selected = self.kg_triples[idxs]  # [B, 3]
+        selected = self.kg_triples[idxs]
 
-        heads    = selected[:, 0].tolist()
-        rels     = selected[:, 1].tolist()
-        t_pos    = selected[:, 2].tolist()
+        heads = selected[:, 0].tolist()
+        rels  = selected[:, 1].tolist()
+        t_pos = selected[:, 2].tolist()
 
-        # Corrupt tails (vectorized)
         t_neg = self.rng.randint(0, self.n_entities, size=batch_size)
-        # Ensure neg != pos (fix collisions)
         collision = t_neg == selected[:, 2]
         t_neg[collision] = (t_neg[collision] + 1) % self.n_entities
 
         return heads, rels, t_pos, t_neg.tolist()
-
-    # ── Dataset interface (re-use parent __getitem__) ─────────────────────────
-    # KGDataset inherits BPR sampling from CFDataset.__getitem__
-    # KG-specific trainers call sample_kg_triple() directly.

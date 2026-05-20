@@ -11,8 +11,8 @@
 #   [PARAM-1] weight_decay: project base.yaml has 1e-4 → MATCHES paper (OK)
 #   [PARAM-2] n_layers: 3 → MATCHES paper (OK)
 #   [PARAM-3] embedding_dim: 64 → MATCHES paper (OK)
-#   [PARAM-4] early_stopping_patience: 20 → paper has no ES; KGCL uses 5-10
-#             Recommendation: reduce to 10 for faster turnaround.
+#   [PARAM-4] early_stopping_patience: 5 → paper has no ES; KGCL uses 5-10
+#             Recommendation: reduce to 5 for faster turnaround.
 # ─────────────────────────────────────────────────────────────────────────────
 model:
   name: lightgcn
@@ -20,4 +20,4 @@ model:
 
 train:
   weight_decay: 1.0e-4 # paper: --decay=1e-4  ✓
-  early_stopping_patience: 10 # paper: no ES; 10 is safe for large datasets
+  early_stopping_patience: 5 # paper: no early stopping; KGCL uses 5-10 → reduce to 5 for faster turnaround
