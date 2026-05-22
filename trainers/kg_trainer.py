@@ -5,17 +5,17 @@ Trainer for Knowledge Graph models: KGAT, KGCL, KG-LightGCN.
 
 Fixes vs previous version:
   [BUG-C1-FIX] self.lambda_cl không được khai báo trong __init__.
-               _kgcl_step() tham chiếu self.lambda_cl → AttributeError âm thầm
-               (Python resolve về base class rồi crash hoặc dùng giá trị sai).
+               _kgcl_step() tham chiếu self.lambda_cl → AttributeError âm thầm.
                Fix: khai báo tường minh từ cfg["contrastive"]["lambda_cl"].
 
   [BUG-C2-FIX] _kgcl_step(): KGCL forward giờ trả về 7 tensors
                (user_emb, pos, neg, u1, u2, i1, i2). Unpack đúng và tính
                cả user_cl + item_cl như paper Eq.(9).
 
-  [BUG-K4-FIX] KGAT: truyền kg_n_layers vào model constructor qua build_kgat
-               (đã sửa trong configs/model/kgat.yaml và main.py).
-               Ở đây: entity_emb cache vẫn giữ như cũ (tính 1 lần/epoch).
+  [FIX-TRAINER-1] Thêm gradient clipping trong _train_one_epoch().
+               KGCL với InfoNCE loss có thể gây gradient explosion.
+
+  [FIX-TRAINER-3] Log patience counter rõ hơn (window trong epochs).
 """
 
 import json
@@ -96,8 +96,6 @@ class KGTrainer(Trainer):
         self.lambda_kg = float(model_cfg.get("kg_reg", 1e-5))
 
         # [BUG-C1-FIX] Khai báo tường minh lambda_cl từ contrastive config
-        # Version cũ không khai báo → self.lambda_cl không tồn tại →
-        # _kgcl_step() crash hoặc dùng giá trị từ base class (0.5 thay vì 0.1)
         cl_cfg = cfg.get("contrastive", {})
         self.lambda_cl = float(cl_cfg.get("lambda_cl", 0.1))
 
@@ -147,7 +145,14 @@ class KGTrainer(Trainer):
                 loss = rec_loss + self.weight_decay * reg_loss
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+            # [FIX-TRAINER-1] Gradient clipping trong KGTrainer cũng
+            # (đã có trong v4 cho KGAT, nay áp dụng cho tất cả KG models)
+            if self.max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=self.max_grad_norm
+                )
+
             self.optimizer.step()
 
             total_loss += loss.item()
@@ -230,10 +235,11 @@ class KGTrainer(Trainer):
         cf_loss = bpr_loss(user_emb, pos_emb, neg_emb)
         l2      = self.model.l2_loss(users, pos_items, neg_items)
 
-        # [BUG-C2-FIX] Tính cả user CL và item CL
+        # [BUG-C2-FIX] Tính cả user CL và item CL (paper Eq.9)
         user_cl = self.model.contrastive_loss(u1, u2)
         item_cl = self.model.contrastive_loss(i1, i2)
-        cl_loss = (user_cl + item_cl) / 2.0
+        # KGCL original: ssl_loss = ssl_loss_users + ssl_loss_items (sum, not avg)
+        cl_loss = user_cl + item_cl
 
         # [BUG-C1-FIX] self.lambda_cl = 0.1 (KGCL paper), không phải 0.5
         return cf_loss + self.lambda_cl * cl_loss + self.weight_decay * l2

@@ -48,8 +48,8 @@ train:
   weight_decay: 1.0e-5 # paper: regs[0]=1e-5 for user/entity emb ✓
 
   # FIX [FIX-1]: CRITICAL — tăng patience để model đủ thời gian hội tụ
-  # Paper train 1000 epochs. eval_interval=5, patience=50 → 250 epoch window.
-  early_stopping_patience: 50
+  # Paper train 1000 epochs. eval_interval=10, patience=10 → 50 epoch window.
+  early_stopping_patience: 10
 
   # KG-specific
   kg_batch_size: 2048 # paper: batch_size_kg=2048 ✓

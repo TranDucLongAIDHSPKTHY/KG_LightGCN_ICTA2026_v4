@@ -10,7 +10,7 @@ fairness:
   batch_size: 2048
   neg_samples: 1 # uniform negative sampling
   epochs: 1000
-  early_stopping_patience: 5
+  early_stopping_patience: 10
   early_stopping_metric: recall@20
   # Contrastive learning (applied only to CL-based models)
   temperature: 0.2

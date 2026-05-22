@@ -6,16 +6,21 @@ for Recommendation.
 Yu et al., SIGIR 2022 — https://arxiv.org/abs/2112.08679
 
 Fixes vs previous version:
-  [BUG-S1-FIX] forward() luôn trả về tuple cố định 7 phần tử:
-               (user_emb, pos_emb, neg_emb, u1, u2, i1, i2)
-               khi apply_item_cl=True, hoặc 5 phần tử khi False.
+  [BUG-S1-FIX] forward() luôn trả về tuple cố định:
+               apply_item_cl=False : (user_emb, pos, neg, u1, u2)        — 5 tensors
+               apply_item_cl=True  : (user_emb, pos, neg, u1, u2, i1, i2) — 7 tensors
                Trainer bây giờ unpack an toàn bằng cách kiểm tra len().
 
   [BUG-S2-NOTE] Paper SimGCL dùng CÙNG perturbed view cho BPR và CL:
                - Thực tế QRec/paper code: BPR dùng clean embedding,
                  2 CL views dùng perturb=True. Giữ nguyên hành vi này.
-               - Không share clean embedding với CL view để tránh
-                 information leak (clean + perturbed ≠ hai independent views).
+
+  [FIX-SIM-2] apply_item_cl mặc định = False trong model class,
+               nhưng config simgcl.yaml đặt = true để sát paper.
+               QRec code:
+                 ssl_loss = self.ssl_loss(user_emb1[users], user_emb2[users])
+                           + self.ssl_loss(item_emb1[pos], item_emb2[pos])
+               (Sum, KHÔNG chia 2 — trainer.py xử lý như vậy)
 
   Giữ nguyên [BUG-1] fix: noise = (rand*2-1)*eps (uniform, no normalize).
 """
@@ -43,7 +48,7 @@ class SimGCL(BaseModel):
         eps: float = 0.1,
         temperature: float = 0.2,
         lambda_cl: float = 0.5,
-        apply_item_cl: bool = False,
+        apply_item_cl: bool = True,   # [FIX-SIM-2] default True để sát paper
         norm_adj: Optional[torch.Tensor] = None,
         device: Optional[torch.device] = None,
     ) -> None:
@@ -73,6 +78,8 @@ class SimGCL(BaseModel):
         LightGCN-style propagation with optional per-layer uniform noise.
 
         [BUG-1-FIX] Uniform noise per element: ε ~ Uniform(-eps, eps).
+        Matches SimGCL paper Eq.4: independent noise per dimension,
+        NOT normalize-then-scale (which gives fixed magnitude, not uniform).
         """
         _dev = self.user_embedding.weight.device
         adj  = self.norm_adj.to(_dev)
@@ -83,6 +90,7 @@ class SimGCL(BaseModel):
         for _ in range(self.n_layers):
             E_k = torch.sparse.mm(adj, E_k)
             if perturb:
+                # [BUG-1-FIX] uniform in (-eps, eps) per element
                 noise = (torch.rand_like(E_k) * 2 - 1) * self.eps
                 E_k   = E_k + noise
             acc = acc + E_k
@@ -102,10 +110,16 @@ class SimGCL(BaseModel):
         Returns BPR embeddings + augmented views for CL loss.
 
         [BUG-S1-FIX] Luôn trả về tuple có kích thước nhất quán:
-          apply_item_cl=False (default): (user_emb, pos, neg, u1, u2)        — 5 tensors
-          apply_item_cl=True:            (user_emb, pos, neg, u1, u2, i1, i2) — 7 tensors
+          apply_item_cl=False: (user_emb, pos, neg, u1, u2)              — 5 tensors
+          apply_item_cl=True:  (user_emb, pos, neg, u1, u2, i1, i2)      — 7 tensors
 
         Trainer._train_one_epoch() kiểm tra len() trước khi unpack.
+
+        Note về QRec implementation:
+          ssl_loss  = ssl(user_view1[users], user_view2[users])
+                    + ssl(item_view1[pos], item_view2[pos])
+          total_loss = bpr_loss + lambda * ssl_loss
+          (Sum user+item CL, bổ sung vào trainer)
         """
         # Clean propagation cho BPR
         user_emb, item_emb = self._propagate(perturb=False)
@@ -130,13 +144,16 @@ class SimGCL(BaseModel):
         view1: torch.Tensor,
         view2: torch.Tensor,
     ) -> torch.Tensor:
-        """Symmetric InfoNCE loss between two views."""
+        """
+        Symmetric InfoNCE loss between two views.
+        Matches QRec ssl_loss implementation.
+        """
         v1  = F.normalize(view1, dim=-1)
         v2  = F.normalize(view2, dim=-1)
         sim = torch.matmul(v1, v2.T) / self.temperature
         labels = torch.arange(len(v1), device=v1.device)
         loss   = F.cross_entropy(sim, labels) + F.cross_entropy(sim.T, labels)
-        return loss / 2
+        return loss / 2  # symmetric average
 
     def l2_loss(
         self,

@@ -64,6 +64,7 @@ class KGDataset(CFDataset):
     # ── KG loading ────────────────────────────────────────────────────────────
 
     def _load_kg(self) -> None:
+
         kg_filename = {
             "full":     "kg_full.txt",
             "category": "kg_category.txt",
@@ -71,49 +72,122 @@ class KGDataset(CFDataset):
         }.get(self.kg_type, "kg_full.txt")
 
         kg_path = os.path.join(self.data_dir, kg_filename)
+
         if not os.path.exists(kg_path):
             raise FileNotFoundError(
                 f"KG file not found: {kg_path}. "
                 "Run scripts/preprocess.py first."
             )
 
+        # ------------------------------------------------------------------
+        # Load KG triples
+        # ------------------------------------------------------------------
+
         triples: List[Tuple[int, int, int]] = []
+
         with open(kg_path, "r") as f:
+
             for line in f:
+
                 parts = line.strip().split()
-                if len(parts) == 3:
-                    triples.append((int(parts[0]), int(parts[1]), int(parts[2])))
+
+                if len(parts) != 3:
+                    continue
+
+                h, r, t = map(int, parts)
+
+                triples.append((h, r, t))
 
         if not triples:
             raise ValueError(f"KG file is empty: {kg_path}")
 
         self.kg_triples = np.array(triples, dtype=np.int64)
 
-        all_entities = set(self.kg_triples[:, 0]) | set(self.kg_triples[:, 2])
+        # ------------------------------------------------------------------
+        # Basic KG statistics
+        # ------------------------------------------------------------------
+
+        all_entities = (
+            set(self.kg_triples[:, 0]) |
+            set(self.kg_triples[:, 2])
+        )
+
         self.n_entities = max(all_entities) + 1
         self.n_relations = int(self.kg_triples[:, 1].max()) + 1
 
-        entity_map_path = os.path.join(self.data_dir, "item2entity.json")
+        # ------------------------------------------------------------------
+        # Load item ↔ entity mapping
+        # ------------------------------------------------------------------
+
+        entity_map_path = os.path.join(
+            self.data_dir,
+            "item2entity.json"
+        )
+
         if os.path.exists(entity_map_path):
+
             with open(entity_map_path, "r") as f:
                 raw_map = json.load(f)
-            for item_str, entity_id in raw_map.items():
-                item_id = int(item_str)
-                if item_id < self.n_items:
-                    self.item2entity[item_id] = entity_id
-                    self.entity2item[entity_id] = item_id
 
-        n_mapped = len(self.item2entity)
-        coverage = n_mapped / self.n_items if self.n_items > 0 else 0.0
+            for item_str, entity_id in raw_map.items():
+
+                item_id = int(item_str)
+
+                if item_id < self.n_items:
+
+                    self.item2entity[item_id] = int(entity_id)
+                    self.entity2item[int(entity_id)] = item_id
+
+        # ------------------------------------------------------------------
+        # REAL KG COVERAGE
+        #
+        # Definition:
+        # fraction of items with at least one metadata record
+        # in meta_Books.json.gz
+        # ------------------------------------------------------------------
+
+        coverage = 0.0
+        n_items_without_kg = 0
+        n_items_with_kg = 0
+
+        stats_path = os.path.join(
+            self.data_dir,
+            "stats.json"
+        )
+
+        if os.path.exists(stats_path):
+
+            with open(stats_path, "r") as f:
+                stats = json.load(f)
+
+            coverage = float(
+                stats.get("kg_coverage", 0.0)
+            )
+
+            n_items_without_kg = int(
+                stats.get("n_items_without_kg", 0)
+            )
+
+            n_items_with_kg = (
+                self.n_items - n_items_without_kg
+            )
+
+        # ------------------------------------------------------------------
+        # Logging
+        # ------------------------------------------------------------------
 
         from utils.logger import get_logger
+
         _logger = get_logger("kg_dataset")
+
         _logger.info(
             f"KG loaded ({self.kg_type}): "
             f"{len(triples):,} triples | "
             f"{self.n_entities:,} entities | "
             f"{self.n_relations:,} relations | "
-            f"item coverage: {coverage:.1%}"
+            f"item coverage: {coverage:.1%} | "
+            f"items with KG: {n_items_with_kg:,} | "
+            f"items without KG: {n_items_without_kg:,}"
         )
 
     # ── KG adjacency structures ───────────────────────────────────────────────

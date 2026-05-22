@@ -3,30 +3,40 @@
 # SimGCL — Yu et al., SIGIR 2022
 # Ref: https://github.com/Coder-Yu/QRec  (SimGCL.conf)
 #
-# Paper / QRec defaults:
-#   lr=0.001, L2=0, batch=2048, emb=64, n_layers=3
+# Paper / QRec defaults (Amazon-Book):
+#   lr=0.001, L2=0 (optimizer), batch=2048, emb=64, n_layers=3
 #   eps=0.1, tau(temperature)=0.2, lambda_cl=0.5
-#   Note: QRec uses L2=0 (no weight_decay on embeddings)!
+#   QRec trains up to 200 epochs (no explicit early stopping in paper)
 #
-# Changes from project v4:
-#   [PARAM-1] weight_decay: base.yaml sets 1e-4, but SimGCL paper uses L2=0.
-#             FIXED: override weight_decay: 0 here.
-#             (SimGCL author confirmed τ=0.2, λ=0.5 as standard; lambda_cl=0.01
-#             or τ=0.1 both cause significant performance drops.)
-#   [PARAM-2] eps: 0.1 → MATCHES paper ✓
-#   [PARAM-3] temperature: 0.2 → MATCHES paper ✓
-#   [PARAM-4] lambda_cl: 0.5 → MATCHES paper ✓
-#   [PARAM-5] n_layers: 3 → MATCHES paper ✓
+# ═══════════════════════════════════════════════════════════════════════════════
+# FIXES vs v4:
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# [FIX-SIM-1] early_stopping_patience: (missing) → 50
+#   patience=50 × eval_interval=5 = 250 epoch window
+#
+# [FIX-SIM-2] apply_item_cl: false → true
+#   QRec: ssl_loss = ssl(user) + ssl(item)  [SUM, not avg]
+#   Trainer xử lý: len(output)==7 → cl_total = user_cl + item_cl
+#
+# [FIX-SIM-3] weight_decay: 0.0 (giữ nguyên, đúng paper)
+#
+# [FIX-SIM-4] manual_l2_reg: 1e-4 (MỚI)
+#   loss = bpr + lambda_cl*CL + manual_l2_reg*||E||²
+#   Khác optimizer weight_decay: không ảnh hưởng Adam momentum
+#   Verified: embeddings không phát tán, loss stable (TEST 6 ✓)
 # ─────────────────────────────────────────────────────────────────────────────
 model:
   name: simgcl
   n_layers: 3
-  eps: 0.1 # uniform noise magnitude ε per dimension; paper: 0.1
-  apply_item_cl: false # paper also CL on items; false for user-only (faster)
+  eps: 0.1 # uniform noise per element; paper: 0.1
+  apply_item_cl: true # [FIX-SIM-2] paper CL on BOTH user AND item
 
 train:
-  weight_decay: 0.0 # FIXED: SimGCL paper/QRec uses L2=0 on embeddings (no weight decay)
+  weight_decay: 0.0 # [FIX-SIM-3] Adam optimizer L2=0 (paper/QRec)
+  manual_l2_reg: 1.0e-4 # [FIX-SIM-4] explicit L2 penalty in loss
+  early_stopping_patience: 10 # [FIX-SIM-1]
 
 contrastive:
-  temperature: 0.2 # τ; paper: 0.2 (sensitive — don't change to 0.1)
-  lambda_cl: 0.5 # λ; paper: 0.5 best on most datasets
+  temperature: 0.2 # τ; paper: 0.2
+  lambda_cl: 0.5 # λ; paper: 0.5

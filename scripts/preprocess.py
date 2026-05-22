@@ -17,7 +17,7 @@ KG (tu xay dung) -- Amazon product metadata:
         meta_Books.json.gz de trich xuat thuoc tinh:
           - also_buy   -> relation 0 (also_bought)
           - also_view  -> relation 1 (also_viewed)
-          - categories -> relation 2 (belongs_to_category)
+          - categories -> relation 2 (belongs_to_category)  [CHI LEAF]
           - brand/publisher -> relation 3 (has_brand)
             Trich xuat theo thu tu uu tien:
               1. Truong "brand" (neu co)
@@ -56,6 +56,7 @@ Pipeline:
   4. Tach val tu train pool (10%, user-wise, seed=42, lay 10% cuoi sau shuffle)
   5. Xay dung KG tu meta_Books.json.gz + item_list.txt
      -- ghi ca forward relation (0-3) lan inverse relation (4-7)
+     -- [IMPROVED] category: CHI giu LEAF node (cap sau nhat) de giam noise
   6. Tinh thong ke (coverage tinh tu so item thuc su co metadata)
   7. Kiem tra reproducibility bang fingerprint ket qua (khong re-run pipeline)
   8. Luu tat ca files
@@ -101,6 +102,11 @@ FIXES SO VOI PHIEN BAN CU
 
 [FIX-13] Sua comment build_kg_from_meta: brand entity ID duoc assign ngay trong
          vong lap chinh (khong phai pass 2), brand_pending chi defer viec tao triple.
+
+[IMPROVED-1] build_kg_from_meta (category): Chuyen tu "them tat ca cap category"
+         sang "chi giu LEAF node (phan tu cuoi cung cua moi path)". Viec them tat
+         ca cap trung gian gay noise lon va tao qua nhieu entity thua. Giu lai
+         duy nhat leaf category giup KG gon, chat luong cao hon.
 """
 
 import argparse
@@ -111,7 +117,7 @@ import json
 import os
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 import numpy as np
@@ -317,34 +323,47 @@ def build_kg_from_meta(
 ]:
     """
     Build KG from meta_Books.json.gz, bao gom ca inverse relations.
+    [IMPROVED] Phien ban cai tien: category CHI giu LEAF node.
 
     Entity space:
       [0, n_items)                 : item entities
-      [n_items, n_items+C)         : category entities
+      [n_items, n_items+C)         : category entities  (C = so leaf category duy nhat)
       [n_items+C, n_items+C+P)     : publisher/brand entities
 
-    Forward relations  (0-3):
+    Forward relations (0-3):
       0 : also_bought   (item->item)
       1 : also_viewed   (item->item)
-      2 : has_category  (item->category)
+      2 : has_category  (item->leaf_category)   [IMPROVED: chi leaf, khong all levels]
       3 : has_brand     (item->brand/publisher/leaf_category)
 
-    Inverse relations  (4-7):   rel_inv = rel_fwd + N_FORWARD_RELATIONS
+    Inverse relations (4-7):   rel_inv = rel_fwd + N_FORWARD_RELATIONS
       4 : also_bought_by   (item<-item)
       5 : also_viewed_by   (item<-item)
-      6 : category_of      (category<-item)
+      6 : category_of      (leaf_category<-item)
       7 : brand_of         (brand<-item)
+
+    Ly do chi giu leaf category:
+      - Cac cap trung gian (vd: "Books", "Literature & Fiction") la qua chung,
+        xuat hien tren hang trieu item -> gay noise lon, tang entity space vo ich.
+      - Leaf category (vd: "Historical Romance") phan biet item ro hon,
+        giup KG chat luong hon voi it entity hon.
 
     [FIX-5] Them inverse relations -- n_relations = 8, khop voi benchmark papers
             (KGAT, KGCL, RippleNet thuong dung bidirectional KG).
     """
+    logger.info("  [KG] *** Improved Version -- Leaf-Only Category ***")
     logger.info(f"  [KG] Xay dung KG tu: {gz_path}")
-    logger.info(f"       Items can map: {n_items:,}")
+    logger.info(f"       Items can map   : {n_items:,}")
+    logger.info(
+        "       Category mode  : LEAF ONLY (bo qua cac cap trung gian de giam noise)"
+    )
 
-    # --- ASIN -> new_item_id -------------------------------------------------
-    # item2asin: {remap_id -> ASIN}
-    # item_map:  {remap_id -> new_item_id}
+    # -------------------------------------------------------------------------
+    # Buoc 1: Xay dung bang tra cuu ASIN -> new_item_id
+    # item2asin : {remap_id -> ASIN}
+    # item_map  : {remap_id -> new_item_id}
     # [FIX-1] Dung item_map.get(remap_id) -- nhat quan voi cach build item_map
+    # -------------------------------------------------------------------------
     asin2new_item: Dict[str, int] = {}
     for remap_id, asin in item2asin.items():
         new_iid = item_map.get(remap_id)
@@ -352,18 +371,20 @@ def build_kg_from_meta(
             asin2new_item[asin] = new_iid
 
     n_mapped = len(asin2new_item)
-    logger.info(f"       ASIN mapped: {n_mapped:,}/{n_items:,}")
+    logger.info(f"       ASIN mapped     : {n_mapped:,}/{n_items:,}")
 
-    # --- Entity containers ---------------------------------------------------
-    category2eid: Dict[str, int] = {}
-    brand2eid:    Dict[str, int] = {}
-    next_eid = n_items
+    # -------------------------------------------------------------------------
+    # Buoc 2: Khoi tao cac container
+    # -------------------------------------------------------------------------
+    category2eid: Dict[str, int] = {}   # leaf category name -> entity ID
+    brand2eid:    Dict[str, int] = {}   # brand/publisher name -> entity ID
+    next_eid = n_items                  # entity ID tiep theo (sau khoang item)
 
-    # Forward triples (dedup bang set)
+    # Forward triples (dung set de tu dong dedup)
     fwd_triples: Set[Tuple[int, int, int]] = set()
 
-    # [FIX-13] brand entity ID duoc assign ngay trong vong lap chinh;
-    # brand_pending chi defer viec tao triple (khong phai "pass 2 assign").
+    # brand_pending: defer viec tao triple brand den sau vong lap chinh
+    # (brand entity ID da duoc assign ngay trong vong lap -- [FIX-13])
     brand_pending: List[Tuple[int, str]] = []
 
     REL_ALSO_BOUGHT = 0
@@ -371,9 +392,12 @@ def build_kg_from_meta(
     REL_CATEGORY    = 2
     REL_BRAND       = 3
 
-    n_processed = 0
-    n_matched   = 0
+    n_processed = 0   # tong so record da doc trong gz file
+    n_matched   = 0   # so item co ASIN khop voi dataset
 
+    # -------------------------------------------------------------------------
+    # Buoc 3: Duyet toan bo record trong meta_Books.json.gz
+    # -------------------------------------------------------------------------
     logger.info("       Dang doc metadata ...")
 
     for record in _iter_meta_books(gz_path):
@@ -385,21 +409,22 @@ def build_kg_from_meta(
                 f"{len(fwd_triples):,} forward triples"
             )
 
+        # -- Lay ASIN va kiem tra co trong dataset khong --
         asin = str(record.get("asin", "")).strip()
         if not asin:
             continue
 
         src_item = asin2new_item.get(asin)
         if src_item is None:
+            # ASIN nay khong co trong dataset sau 5-core filter -> bo qua
             continue
 
         n_matched += 1
 
-        # -- related (also_bought / also_viewed) ------------------------------
-        # McAuley dataset ton tai 2 format:
+        # -- Relation 0 & 1: also_bought / also_viewed (item->item) -----------
+        # Ho tro ca hai format McAuley:
         #   - 2018 version: 'related' -> {'also_bought': [...], 'also_viewed': [...]}
         #   - 2023 version: top-level 'also_buy': [...], 'also_view': [...]
-        # Ho tro ca hai de khong bi miss toan bo item-item triples.
         related = record.get("related", {})
 
         also_bought_list = (
@@ -423,7 +448,20 @@ def build_kg_from_meta(
             if tgt_item is not None and tgt_item != src_item:
                 fwd_triples.add((src_item, REL_ALSO_VIEWED, tgt_item))
 
-        # -- categories -------------------------------------------------------
+        # -- Relation 2: has_category (item->LEAF category only) --------------
+        # [IMPROVED-1] Chi giu LEAF node (phan tu cuoi cung) cua moi path.
+        #
+        # Vi du category paths:
+        #   [["Books", "Literature & Fiction", "Historical Romance"],
+        #    ["Books", "Romance"]]
+        #
+        # Phien ban cu (them tat ca cap):
+        #   -> entities: "Books", "Literature & Fiction", "Historical Romance", "Romance"
+        #   -> 4 triples per item (nhieu noise tu "Books", "Literature & Fiction")
+        #
+        # Phien ban moi (chi leaf):
+        #   -> entities: "Historical Romance", "Romance"
+        #   -> 2 triples per item (chat luong hon, it noise hon)
         raw_cats = (
             record.get("categories")
             or record.get("category")
@@ -442,21 +480,26 @@ def build_kg_from_meta(
                 if cat:
                     normalized_paths.append([cat])
 
+        # Chi lay LEAF (phan tu cuoi) cua moi path, dedup bang set
+        leaf_cats: Set[str] = set()
         for path in normalized_paths:
-            for cat_name in path:
-                if cat_name not in category2eid:
-                    category2eid[cat_name] = next_eid
-                    next_eid += 1
-                fwd_triples.add((src_item, REL_CATEGORY, category2eid[cat_name]))
+            leaf_cats.add(path[-1])   # path[-1] la cap sau nhat (leaf)
 
-        # -- brand ------------------------------------------------------------
-        # [FIX-7] first_path: path dau tien (neu co) dung cho fallback leaf
+        for leaf in leaf_cats:
+            # Assign entity ID cho leaf category neu chua co
+            if leaf not in category2eid:
+                category2eid[leaf] = next_eid
+                next_eid += 1
+            fwd_triples.add((src_item, REL_CATEGORY, category2eid[leaf]))
+
+        # -- Relation 3: has_brand (item->brand/publisher) --------------------
+        # [FIX-7] first_path: path dau tien dung lam fallback leaf cho brand
         first_path = normalized_paths[0] if normalized_paths else []
-        brand_val = _extract_brand(record, first_path)
+        brand_val  = _extract_brand(record, first_path)
 
         if brand_val:
-            # [FIX-13] Assign brand entity ID ngay tai day trong vong lap chinh.
-            # brand_pending chi defer viec ghi triple sau khi xong vong lap.
+            # [FIX-13] Assign brand entity ID ngay tai day.
+            # brand_pending chi defer viec ghi triple, KHONG defer assign ID.
             if brand_val not in brand2eid:
                 brand2eid[brand_val] = next_eid
                 next_eid += 1
@@ -467,12 +510,16 @@ def build_kg_from_meta(
         f"{n_processed:,} records | {n_matched:,} matched"
     )
 
-    # --- Brand triples -------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Buoc 4: Tao brand triples (da defer tu vong lap chinh)
+    # -------------------------------------------------------------------------
     for src_item, brand in brand_pending:
         fwd_triples.add((src_item, REL_BRAND, brand2eid[brand]))
 
-    # --- Them inverse relations ----------------------------------------------
-    # [FIX-5] rel_inv = rel_fwd + N_FORWARD_RELATIONS
+    # -------------------------------------------------------------------------
+    # Buoc 5: Them inverse relations
+    # [FIX-5] rel_inv = rel_fwd + N_FORWARD_RELATIONS (offset = 4)
+    # -------------------------------------------------------------------------
     all_triples: List[Tuple[int, int, int]] = list(fwd_triples)
     inv_triples: List[Tuple[int, int, int]] = [
         (t, r + N_FORWARD_RELATIONS, h) for h, r, t in fwd_triples
@@ -482,27 +529,29 @@ def build_kg_from_meta(
     n_entities  = next_eid
     n_relations = N_FORWARD_RELATIONS * 2  # 8
 
-    # --- Coverage ------------------------------------------------------------
-    # [FIX-2] Coverage = ty le items thuc su co record trong gz file.
-    # n_mapped = so ASIN co trong item_list.txt (= n_items sau remap -> 100%)
-    # n_matched = so items thuc su tim thay record trong meta_Books.json.gz
-    # Coverage dung nghia phai la n_matched / n_items.
-    kg_coverage = n_matched / n_items if n_items > 0 else 0.0
+    # -------------------------------------------------------------------------
+    # Buoc 6: Tinh coverage
+    # [FIX-2] Coverage = n_matched / n_items (ty le item thuc su co metadata),
+    # khong phai len(item2entity)/n_items (luon = 1.0, sai hoan toan).
+    # -------------------------------------------------------------------------
+    kg_coverage       = n_matched / n_items if n_items > 0 else 0.0
     n_items_without_kg = n_items - n_matched
 
-    # --- Log summary ---------------------------------------------------------
-    logger.info("  [KG] Summary:")
-    logger.info(f"       Item entities    : {n_items:,}")
-    logger.info(f"       Category entities: {len(category2eid):,}")
-    logger.info(f"       Brand entities   : {len(brand2eid):,}")
-    logger.info(f"       Total entities   : {n_entities:,}")
-    logger.info(f"       Forward relations: {N_FORWARD_RELATIONS}")
-    logger.info(f"       Total relations  : {n_relations}  (fwd + inv)")
-    logger.info(f"       Forward triples  : {len(fwd_triples):,}")
-    logger.info(f"       Total triples    : {len(all_triples):,}  (fwd + inv)")
-    logger.info(f"       KG coverage      : {kg_coverage:.4f}")
+    # -------------------------------------------------------------------------
+    # Log summary
+    # -------------------------------------------------------------------------
+    logger.info("  [KG] Summary (Improved -- Leaf-Only Category):")
+    logger.info(f"       Item entities      : {n_items:,}")
+    logger.info(f"       Leaf category ents : {len(category2eid):,}  (leaf only, no intermediate nodes)")
+    logger.info(f"       Brand entities     : {len(brand2eid):,}")
+    logger.info(f"       Total entities     : {n_entities:,}")
+    logger.info(f"       Forward relations  : {N_FORWARD_RELATIONS}")
+    logger.info(f"       Total relations    : {n_relations}  (fwd + inv)")
+    logger.info(f"       Forward triples    : {len(fwd_triples):,}")
+    logger.info(f"       Total triples      : {len(all_triples):,}  (fwd + inv)")
+    logger.info(f"       KG coverage        : {kg_coverage:.4f}")
     logger.info(
-        f"       Items without KG : {n_items_without_kg:,} "
+        f"       Items without KG   : {n_items_without_kg:,} "
         f"({n_items_without_kg / n_items * 100:.1f}%) -- "
         f"no record found in meta_Books.json.gz"
     )
@@ -723,35 +772,36 @@ def compute_stats(
     n_te = sum(len(v) for v in test_d.values())
 
     denom = n_users * n_items if n_users * n_items else 1
-    density_train     = n_tr / denom
+    density_train      = n_tr / denom
     density_all_splits = (n_tr + n_va + n_te) / denom
 
     stats: dict = {
-        "n_users":           n_users,
-        "n_items":           n_items,
-        "n_train":           n_tr,
-        "n_val":             n_va,
-        "n_test":            n_te,
-        "n_total":           n_tr + n_va + n_te,
-        "density_train":     round(density_train,      8),
+        "n_users":            n_users,
+        "n_items":            n_items,
+        "n_train":            n_tr,
+        "n_val":              n_va,
+        "n_test":             n_te,
+        "n_total":            n_tr + n_va + n_te,
+        "density_train":      round(density_train,      8),
         "density_all_splits": round(density_all_splits, 8),
-        "split_protocol":    "original_test_val_from_train_shuffle_last10pct",
-        "val_ratio":         val_ratio,
-        "val_seed":          val_seed,
+        "split_protocol":     "original_test_val_from_train_shuffle_last10pct",
+        "val_ratio":          val_ratio,
+        "val_seed":           val_seed,
     }
     if n_entities is not None:
         n_without_kg = n_items - round(kg_coverage * n_items) if kg_coverage is not None else None
         stats.update({
-            "n_entities":        n_entities,
-            "n_relations":       n_relations,
-            "n_kg_triples":      n_kg_triples,
-            "kg_coverage":       round(kg_coverage or 0.0, 4),
+            "n_entities":         n_entities,
+            "n_relations":        n_relations,
+            "n_kg_triples":       n_kg_triples,
+            "kg_coverage":        round(kg_coverage or 0.0, 4),
             "n_items_without_kg": n_without_kg,
             "kg_coverage_note":  (
                 "fraction of items with at least one record in meta_Books.json.gz; "
                 "items without KG coverage have no KG triples and rely solely on "
                 "CF-side embeddings"
             ),
+            "kg_category_mode": "leaf_only (intermediate category nodes excluded)",
         })
     return stats
 
@@ -832,6 +882,7 @@ def preprocess_amazon_book(raw_dir: str, out_dir: str) -> None:
     logger.info("  CF source : LightGCN-PyTorch repo")
     logger.info("  KG source : meta_Books")
     logger.info("  Protocol  : original test split, val carved from train")
+    logger.info("  KG mode   : Improved -- Leaf-Only Category")
     logger.info("=" * 65)
 
     ds_dir = os.path.join(raw_dir, "amazon-book")
@@ -933,22 +984,26 @@ def preprocess_amazon_book(raw_dir: str, out_dir: str) -> None:
         "n_entities":  n_entities,
         "n_relations": n_relations,
         "n_triples":   len(triples),
+        "kg_version":  "improved_leaf_only_category",
         "relations": {
-            "0": "also_bought    (item->item,     forward)",
-            "1": "also_viewed    (item->item,     forward)",
-            "2": "has_category   (item->category, forward)",
-            "3": "has_brand      (item->brand,    forward)",
-            "4": "also_bought_by (item<-item,     inverse of 0)",
-            "5": "also_viewed_by (item<-item,     inverse of 1)",
-            "6": "category_of    (category<-item, inverse of 2)",
-            "7": "brand_of       (brand<-item,    inverse of 3)",
+            "0": "also_bought    (item->item,          forward)",
+            "1": "also_viewed    (item->item,          forward)",
+            "2": "has_category   (item->leaf_category, forward, LEAF ONLY)",
+            "3": "has_brand      (item->brand,         forward)",
+            "4": "also_bought_by (item<-item,          inverse of 0)",
+            "5": "also_viewed_by (item<-item,          inverse of 1)",
+            "6": "category_of    (leaf_category<-item, inverse of 2)",
+            "7": "brand_of       (brand<-item,         inverse of 3)",
         },
         "entity_ranges": {
-            "items":      f"[0, {n_items})",
-            "categories": f"[{n_items}, n_items+n_categories)",
-            "brands":     f"[n_items+n_categories, {n_entities})",
+            "items":            f"[0, {n_items})",
+            "leaf_categories":  f"[{n_items}, n_items+n_leaf_categories)",
+            "brands":           f"[n_items+n_leaf_categories, {n_entities})",
         },
-        "note": "n_relations=8 (4 fwd + 4 inv) -- compatible with KGAT/KGCL/RippleNet",
+        "note": (
+            "n_relations=8 (4 fwd + 4 inv) -- compatible with KGAT/KGCL/RippleNet. "
+            "Category: LEAF ONLY (intermediate nodes excluded to reduce noise)."
+        ),
     }
     with open(os.path.join(out_dir, "kg_meta.json"), "w", encoding="utf-8") as f:
         json.dump(kg_meta, f, indent=2)
